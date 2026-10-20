@@ -1819,6 +1819,7 @@ function F.CreateNameESPTag(Player, Character, Head)
 	if not Head or not Head:IsA("BasePart") or not Head:IsDescendantOf(Character) then return false end
 	F.RemoveNameESP(Player)
 	local Tag = Instance.new("BillboardGui")
+    Tag.ResetOnSpawn = false
 	Tag.Name = "for the chosenPlayerNameTag"
 	Tag.Adornee = Head
 	Tag.Size = UDim2.fromOffset(120, 20)
