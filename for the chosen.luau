@@ -10,7 +10,7 @@ end
 local Run, CompileError = Compile([====[
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 39 / TRIGGER TOGGLE & ESP FIX
+-- CLIENT PAYLOAD / REVISION 45 / WELCOME TAB & LIVE METRICS
 -- The enclosing loader embeds this entire payload. Run the complete file
 -- in a client Luau environment that provides loadstring and Roblox APIs.
 -- All panel logic, camera controls, overlays and movement run on the client.
@@ -45,7 +45,9 @@ local Run, CompileError = Compile([====[
 -- TEXTURED UI
 -- COMPACT MINIMIZE
 -- STREAMER MODE
--- RAPID FIRE & WALL JUMP (BUNNY HOP REMOVED)
+-- RAPID FIRE & WALL JUMP
+-- ANIMATED PINK & BLACK GRADIENT BANNER
+-- LIVE PERFORMANCE STATS (PING / FPS / SERVER HEALTH)
 --========================================================
 
 local C = {}
@@ -75,6 +77,7 @@ S.SoundService = game:GetService("SoundService")
 S.ReplicatedStorage = game:GetService("ReplicatedStorage")
 S.HttpService = game:GetService("HttpService")
 S.GuiService = game:GetService("GuiService")
+S.Stats = game:GetService("Stats")
 
 S.Player = S.Players.LocalPlayer
 
@@ -167,27 +170,20 @@ C.Distance = {
 
 T.BG = Color3.fromRGB(48, 48, 48)
 T.BG2 = Color3.fromRGB(58, 58, 58)
-
 T.Sidebar = Color3.fromRGB(38, 38, 38)
 T.Topbar = Color3.fromRGB(31, 31, 31)
-
 T.Panel = Color3.fromRGB(43, 43, 43)
 T.Panel2 = Color3.fromRGB(55, 55, 55)
-
 T.Card = Color3.fromRGB(45, 45, 45)
 T.CardHover = Color3.fromRGB(62, 62, 62)
-
 T.Red = Color3.fromRGB(230, 91, 157)
 T.RedBright = Color3.fromRGB(244, 119, 177)
 T.RedDark = Color3.fromRGB(91, 43, 65)
 T.RedDeep = Color3.fromRGB(65, 35, 49)
-
 T.Green = Color3.fromRGB(130, 190, 151)
 T.Yellow = Color3.fromRGB(220, 184, 112)
-
 T.Text = Color3.fromRGB(238, 238, 238)
 T.Muted = Color3.fromRGB(174, 174, 174)
-
 T.Border = Color3.fromRGB(59, 59, 59)
 T.BorderBright = Color3.fromRGB(70, 70, 70)
 
@@ -279,6 +275,10 @@ St.NextAnimationScan = 0
 St.HasWallJumped = false
 St.MouseDown = false
 
+St.FpsCount = 0
+St.LastFpsTime = os.clock()
+St.CurrentFps = 60
+
 St.RenderBinding = "for the chosenCameraLock_" .. S.HttpService:GenerateGUID(false)
 St.Logs = {}
 
@@ -315,12 +315,8 @@ S.OffSound.Parent = S.SoundService
 
 function F.Log(Text)
 	table.insert(St.Logs, 1, Text)
-	while #St.Logs > 6 do
-		table.remove(St.Logs)
-	end
-	if UI.Log then
-		UI.Log.Text = table.concat(St.Logs, "\n")
-	end
+	while #St.Logs > 6 do table.remove(St.Logs) end
+	if UI.Log then UI.Log.Text = table.concat(St.Logs, "\n") end
 end
 
 --========================================================
@@ -329,40 +325,28 @@ end
 
 function F.Connect(Signal, Callback, Connections)
 	local Connection = Signal:Connect(function(...)
-		if not St.Cleaned then
-			Callback(...)
-		end
+		if not St.Cleaned then Callback(...) end
 	end)
 	table.insert(Connections or St.Connections, Connection)
 	return Connection
 end
 
 function F.DisconnectAll(Connections)
-	for _, Connection in pairs(Connections) do
-		Connection:Disconnect()
-	end
+	for _, Connection in pairs(Connections) do Connection:Disconnect() end
 	table.clear(Connections)
 end
 
 function F.FiniteNumber(Value)
-	if typeof(Value) ~= "number" and typeof(Value) ~= "string" then
-		return nil
-	end
+	if typeof(Value) ~= "number" and typeof(Value) ~= "string" then return nil end
 	local Number = tonumber(Value)
-	if Number and Number == Number and math.abs(Number) < math.huge then
-		return Number
-	end
+	if Number and Number == Number and math.abs(Number) < math.huge then return Number end
 	return nil
 end
 
 function F.StateEnabled(Value)
-	if typeof(Value) == "boolean" then
-		return Value
-	end
+	if typeof(Value) == "boolean" then return Value end
 	local Number = F.FiniteNumber(Value)
-	if Number ~= nil then
-		return Number > 0
-	end
+	if Number ~= nil then return Number > 0 end
 	if typeof(Value) == "string" then
 		local Text = string.lower(string.match(Value, "^%s*(.-)%s*$"))
 		return Text == "true" or Text == "yes" or Text == "on"
@@ -380,22 +364,16 @@ function F.CachedStateValue(Character, Kind, Names)
 		St.StateCache[Character] = Cache
 	end
 	local Entry = Cache[Kind]
-	if Entry and Entry.Object and Entry.Object:IsDescendantOf(Character) then
-		return Entry.Object
-	end
+	if Entry and Entry.Object and Entry.Object:IsDescendantOf(Character) then return Entry.Object end
 	local Now = os.clock()
-	if Entry and not Entry.Object and Now < Entry.NextScan then
-		return nil
-	end
+	if Entry and not Entry.Object and Now < Entry.NextScan then return nil end
 	local Object = F.FindValue(Character, Names)
 	Cache[Kind] = {Object = Object, NextScan = Now + 0.5}
 	return Object
 end
 
 function F.PointerOverPanel()
-	if not UI.Gui or not UI.Gui.Enabled or not UI.Main or not UI.Main.Visible then
-		return false
-	end
+	if not UI.Gui or not UI.Gui.Enabled or not UI.Main or not UI.Main.Visible then return false end
 	local Point = S.UIS:GetMouseLocation()
 	local Position = UI.Main.AbsolutePosition
 	local Size = UI.Main.AbsoluteSize
@@ -806,9 +784,7 @@ function F.ToolEmpty(Tool)
 end
 
 function F.ToolReady(Tool, IgnoreEnabled)
-	if not Tool or not Tool:IsA("Tool") then
-		return false
-	end
+	if not Tool or not Tool:IsA("Tool") then return false end
 	if C.TriggerKnifeCheck and F.IsKnifeTool(Tool) then return false end
 	if Tool.RequiresHandle then
 		local Handle = Tool:FindFirstChild("Handle")
@@ -1664,7 +1640,7 @@ function F.DisableUniversal(_Holster, _Force)
 end
 
 function F.EnableUniversal()
-	F.DisableSequential(false) -- This was accidentally typed as St.DisableSequential
+	F.DisableSequential(false)
 	St.Panicked = false
 	St.Universal = true
 	St.RangeRetryAt = 0
@@ -1818,13 +1794,14 @@ function F.CreateNameESPTag(Player, Character, Head)
 	Head = Head or Character:FindFirstChild("Head")
 	if not Head or not Head:IsA("BasePart") or not Head:IsDescendantOf(Character) then return false end
 	F.RemoveNameESP(Player)
+	
 	local Tag = Instance.new("BillboardGui")
-    Tag.ResetOnSpawn = false
 	Tag.Name = "for the chosenPlayerNameTag"
 	Tag.Adornee = Head
 	Tag.Size = UDim2.fromOffset(120, 20)
 	Tag.StudsOffset = Vector3.new(0, 2.3, 0)
 	Tag.AlwaysOnTop = true
+	Tag.ResetOnSpawn = false
 	Tag.Enabled = F.NameESPVisible(Player)
 	Tag.Parent = S.PlayerGui
 
@@ -1934,7 +1911,7 @@ function F.ExportConfig()
 	end
 	for Slot, Name in pairs(St.LearnedSlots) do Learned[tostring(Slot)] = Name end
 	return S.HttpService:JSONEncode({
-		version = 39,
+		version = 45,
 		dualFire = {
 			db = C.DualFireDBName, tac = C.DualFireTacName,
 			repeatDelayMs = C.DualFireCooldown * 1000,
@@ -2315,6 +2292,106 @@ function F.MakeNav(Name, Text, Y)
 	UI.Nav[Name] = {Button = Button, Bar = Bar}
 end
 
+function F.BuildWelcomePage()
+	UI.WelcomePage = F.MakePage("Welcome")
+	
+	local Header = F.Label(UI.WelcomePage, "Welcome", UDim2.fromOffset(350, 26), UDim2.fromOffset(0, 0), 18)
+	Header.Font = Enum.Font.GothamBold
+	F.Label(UI.WelcomePage, "Your local identity overview and live performance metrics.", UDim2.fromOffset(450, 18), UDim2.fromOffset(0, 28), 9, T.Muted)
+
+	local Card = Instance.new("Frame")
+	Card.Position = UDim2.fromOffset(0, 62)
+	Card.Size = UDim2.new(1, 0, 1, -63)
+	Card.BackgroundColor3 = T.Card
+	Card.BorderSizePixel = 0
+	Card.Parent = UI.WelcomePage
+	F.Round(Card, 9)
+	F.Stroke(Card)
+
+	local Avatar = Instance.new("ImageLabel")
+	Avatar.Size = UDim2.fromOffset(100, 100)
+	Avatar.Position = UDim2.fromOffset(24, 24)
+	Avatar.BackgroundColor3 = T.Panel2
+	Avatar.BorderSizePixel = 0
+	Avatar.Parent = Card
+	F.Round(Avatar, 50) 
+	F.Stroke(Avatar)
+
+	task.spawn(function()
+		local content = S.Players:GetUserThumbnailAsync(S.Player.UserId, Enum.ThumbnailType.AvatarThumbnail, Enum.ThumbnailSize.Size150x150)
+		Avatar.Image = content
+	end)
+
+	local DisplayLabel = F.Label(Card, S.Player.DisplayName, UDim2.fromOffset(300, 30), UDim2.fromOffset(144, 34), 24, T.RedBright)
+	DisplayLabel.Font = Enum.Font.GothamBold
+
+	local UserLabel = F.Label(Card, "@" .. S.Player.Name, UDim2.fromOffset(300, 20), UDim2.fromOffset(144, 68), 14, T.Muted)
+
+	-- Animated "Chosen One" Banner
+	local ChosenBox = Instance.new("Frame")
+	ChosenBox.Size = UDim2.new(1, -48, 0, 54)
+	ChosenBox.Position = UDim2.fromOffset(24, 140)
+	ChosenBox.BackgroundColor3 = T.Panel2
+	ChosenBox.BorderSizePixel = 0
+	ChosenBox.Parent = Card
+	F.Round(ChosenBox, 9)
+	F.Stroke(ChosenBox)
+
+	local ChosenText = F.Label(ChosenBox, "You are the chosen one, " .. S.Player.DisplayName, UDim2.new(1, 0, 1, 0), UDim2.new(0, 0, 0, 0), 16, Color3.fromRGB(255, 255, 255))
+	ChosenText.Font = Enum.Font.GothamBold
+	ChosenText.TextXAlignment = Enum.TextXAlignment.Center
+
+	local Gradient = Instance.new("UIGradient")
+	Gradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, T.RedBright),
+		ColorSequenceKeypoint.new(0.25, Color3.fromRGB(12, 12, 12)),
+		ColorSequenceKeypoint.new(0.5, T.RedBright),
+		ColorSequenceKeypoint.new(0.75, Color3.fromRGB(12, 12, 12)),
+		ColorSequenceKeypoint.new(1, T.RedBright),
+	})
+	Gradient.Parent = ChosenText
+	UI.ChosenGradient = Gradient
+
+	-- Performance Stats Cards Section
+	local StatsContainer = Instance.new("Frame")
+	StatsContainer.Size = UDim2.new(1, -48, 0, 120)
+	StatsContainer.Position = UDim2.fromOffset(24, 208)
+	StatsContainer.BackgroundTransparency = 1
+	StatsContainer.Parent = Card
+
+	local Layout = Instance.new("UIListLayout")
+	Layout.FillDirection = Enum.FillDirection.Horizontal
+	Layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	Layout.Padding = UDim.new(0, 12)
+	Layout.SortOrder = Enum.SortOrder.LayoutOrder
+	Layout.Parent = StatsContainer
+
+	local function MakeStatCard(TitleText)
+		local Box = Instance.new("Frame")
+		Box.Size = UDim2.new(0.31, 0, 1, 0)
+		Box.BackgroundColor3 = T.Panel2
+		Box.BorderSizePixel = 0
+		Box.Parent = StatsContainer
+		F.Round(Box, 9)
+		F.Stroke(Box)
+
+		local Title = F.Label(Box, TitleText, UDim2.new(1, -16, 0, 20), UDim2.fromOffset(12, 12), 10, T.Muted)
+		Title.Font = Enum.Font.GothamBold
+
+		local Value = F.Label(Box, "--", UDim2.new(1, -16, 0, 32), UDim2.fromOffset(12, 36), 20, T.RedBright)
+		Value.Font = Enum.Font.GothamBold
+
+		local Subtitle = F.Label(Box, "Updating...", UDim2.new(1, -16, 0, 18), UDim2.fromOffset(12, 74), 9, T.Muted)
+		Subtitle.Font = Enum.Font.GothamMedium
+
+		return Value, Subtitle
+	end
+
+	UI.WelcomePingValue, UI.WelcomePingSub = MakeStatCard("NETWORK PING")
+	UI.WelcomeFpsValue, UI.WelcomeFpsSub = MakeStatCard("CLIENT FPS")
+	UI.WelcomeServerValue, UI.WelcomeServerSub = MakeStatCard("SERVER STATUS")
+end
+
 function F.BuildStatusPage()
 	UI.StatusPage = F.MakePage("Status")
 	local Header = F.Label(UI.StatusPage, "Runtime overview", UDim2.fromOffset(360, 26), UDim2.fromOffset(0, 0), 18)
@@ -2476,7 +2553,6 @@ function F.BuildTargetsPage()
 	HeaderText.Font = Enum.Font.GothamBold
 	F.Label(Header, "Export your target list code or paste a friend's target list below to merge missing targets.", UDim2.new(1, 0, 0, 18), UDim2.fromOffset(0, 30), 9, T.Muted)
 
-	-- Share Card Container
 	local ShareCard = F.Card(UI.TargetsScroll, 110)
 	ShareCard.LayoutOrder = 2
 	F.Label(ShareCard, "TARGET LIST SHARING", UDim2.fromOffset(180, 18), UDim2.fromOffset(14, 10), 9, T.Muted)
@@ -2773,17 +2849,22 @@ end
 
 function F.BuildUI()
 	F.BuildBaseUI()
-	F.MakeNav("Status", "STATUS", 52)
-	F.MakeNav("Sequence", "TRIGGER", 96)
-	F.MakeNav("Settings", "SETTINGS", 140)
-	F.MakeNav("Targets", "TARGETS", 184)
-	F.MakeNav("Config", "CONFIG", 228)
+	
+	F.MakeNav("Welcome", "WELCOME", 52)
+	F.MakeNav("Status", "STATUS", 96)
+	F.MakeNav("Sequence", "TRIGGER", 140)
+	F.MakeNav("Settings", "SETTINGS", 184)
+	F.MakeNav("Targets", "TARGETS", 228)
+	F.MakeNav("Config", "CONFIG", 272)
+	
+	F.BuildWelcomePage()
 	F.BuildStatusPage()
 	F.BuildSequencePage()
 	F.BuildSettingsPage()
 	F.BuildTargetsPage()
 	F.BuildConfigPage()
-	F.ShowPage("Status")
+	
+	F.ShowPage("Welcome")
 end
 
 function F.RefreshSequence()
@@ -2826,6 +2907,56 @@ function F.Refresh()
 	UI.ToolStatus.Text = "CURRENT TOOL\n" .. (Tool and Tool.Name or "none") .. "\n" .. (F.FirstPerson() and "first person" or "third person")
 
 	UI.SequenceStatus.Text = (C.RangeAuto and "AUTO DB + TAC 1–<50  •  MANUAL EQUIP REV 50–245" or C.DualFireKey.Name .. " / DB + TAC once  •  TRIGGER / equipped tool") .. "\n" .. C.PanicKey.Name .. " stop  •  " .. C.MenuKey.Name .. " menu"
+
+	if UI.WelcomePingValue then
+		local ping = 0
+		pcall(function()
+			ping = math.floor(S.Player:GetNetworkPing() * 1000 + 0.5)
+		end)
+		if ping == 0 then
+			pcall(function()
+				ping = math.floor(S.Stats.Network.ServerStatsItem["Data Ping"]:GetValue() + 0.5)
+			end)
+		end
+		UI.WelcomePingValue.Text = tostring(ping) .. " ms"
+		if ping < 80 then
+			UI.WelcomePingSub.Text = "Optimal Connection"
+			UI.WelcomePingSub.TextColor3 = T.Green
+		elseif ping < 160 then
+			UI.WelcomePingSub.Text = "Moderate Latency"
+			UI.WelcomePingSub.TextColor3 = T.Yellow
+		else
+			UI.WelcomePingSub.Text = "High Latency"
+			UI.WelcomePingSub.TextColor3 = T.RedBright
+		end
+
+		UI.WelcomeFpsValue.Text = tostring(St.CurrentFps) .. " FPS"
+		if St.CurrentFps >= 50 then
+			UI.WelcomeFpsSub.Text = "Smooth Performance"
+			UI.WelcomeFpsSub.TextColor3 = T.Green
+		elseif St.CurrentFps >= 30 then
+			UI.WelcomeFpsSub.Text = "Acceptable Frame Rate"
+			UI.WelcomeFpsSub.TextColor3 = T.Yellow
+		else
+			UI.WelcomeFpsSub.Text = "Frame Rate Lag"
+			UI.WelcomeFpsSub.TextColor3 = T.RedBright
+		end
+
+		local physFps = 60
+		pcall(function() physFps = math.floor(workspace:GetRealPhysicsFPS() + 0.5) end)
+		if physFps >= 55 then
+			UI.WelcomeServerValue.Text = "STABLE"
+			UI.WelcomeServerValue.TextColor3 = T.Green
+			UI.WelcomeServerSub.Text = "Physics: " .. tostring(physFps) .. " FPS"
+			UI.WelcomeServerSub.TextColor3 = T.Green
+		else
+			UI.WelcomeServerValue.Text = "DEGRADED"
+			UI.WelcomeServerValue.TextColor3 = T.Yellow
+			UI.WelcomeServerSub.Text = "Physics: " .. tostring(physFps) .. " FPS"
+			UI.WelcomeServerSub.TextColor3 = T.Yellow
+		end
+	end
+
 	for _, Refresh in ipairs(UI.SettingRefreshers or {}) do Refresh() end
 	F.RefreshSequence()
 end
@@ -3057,6 +3188,18 @@ function F.StartRuntime()
 	S.RunService:BindToRenderStep(St.RenderBinding, Enum.RenderPriority.Camera.Value + 1, function()
 		F.ApplyNameESPVisibility()
 		if St.Cleaned or not St.Ready then return end
+
+		St.FpsCount += 1
+		local now = os.clock()
+		if now - St.LastFpsTime >= 0.5 then
+			St.CurrentFps = math.floor(St.FpsCount / (now - St.LastFpsTime) + 0.5)
+			St.FpsCount = 0
+			St.LastFpsTime = now
+		end
+
+		if UI.ChosenGradient then
+			UI.ChosenGradient.Offset = Vector2.new((os.clock() * 0.7) % 2 - 1, 0)
+		end
 
 		local Character = S.Player.Character
 		local Humanoid = F.Humanoid(Character)
