@@ -1,53 +1,6 @@
--- for the chosen: self-contained loadstring, with the full corrected script embedded.
--- Requires a client Luau environment that supplies loadstring and Roblox APIs.
--- Standard Roblox LocalScripts do not provide client-side loadstring.
-
-local Compile = loadstring
-if type(Compile) ~= "function" then
-    error("This client environment does not provide loadstring. Use the LocalScript version in Roblox Studio.", 0)
-end
-
-local Run, CompileError = Compile([====[
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 45 / WELCOME TAB & LIVE METRICS
--- The enclosing loader embeds this entire payload. Run the complete file
--- in a client Luau environment that provides loadstring and Roblox APIs.
--- All panel logic, camera controls, overlays and movement run on the client.
--- Tool:Activate uses your existing weapon implementation; this panel does not
--- grant server permissions, apply server damage, kick players or save data.
--- M panic; Right Control open/close menu; F8 toggle streamer mode. Select players on Targets before using targeting.
--- Y issues one paired activation per press, without requiring a selected target.
--- DB and TAC must be real Tools using Tool.Activated, with simultaneous equip
--- supported by your weapon system. The panel cannot confirm server-side shots.
--- Repeat presses can queue ONE additional pair while both guns recover.
--- Trigger checks the current camera ray every frame, before GUI refresh work.
--- Automatic range trigger starts enabled: DB + TAC at 1 <= distance < 50;
--- manually equipped revolver at 50 <= distance <= 245 studs. The panel never
--- draws REV from the backpack. Distances are measured between character roots.
--- CameraLock aligns the target with the actual cursor, not the screen center.
--- When DB ammo reaches zero, close-range automation continues with TAC alone.
--- Reloading DB restores paired fire; TAC still respects its own cooldown.
--- If either shotgun is empty, a manually equipped REV can trigger at 0–245.
--- The adjustable trigger square starts enabled and follows the cursor.
--- A selected, visible target's body center must be inside it to trigger.
--- The cursor ray must hit that same selected player before any automatic shot.
--- The square controls activation; Q/J still control camera aim separately.
--- Universal trigger can be toggled via settings.
--- Y still requests a manual pair; normal trigger behavior resumes afterward.
--- Both guns stay equipped until their activation has been released; the
--- previous equipment is restored afterward. Panic cancels the queued pair.
--- Panic stays stopped until you explicitly enable a control again.
--- Config export/import transfers JSON manually; it is not automatic saving.
--- Target lists can be exported and merged via import.
---
--- NAME ESP: SELECTED TARGETS RED / CREWMATES GREEN / OTHERS HIDDEN
--- TEXTURED UI
--- COMPACT MINIMIZE
--- STREAMER MODE
--- RAPID FIRE & WALL JUMP
--- ANIMATED PINK & BLACK GRADIENT BANNER
--- LIVE PERFORMANCE STATS (PING / FPS / SERVER HEALTH)
+-- CLIENT PAYLOAD / REVISION 46+ / LOCAL FS CONFIGS
 --========================================================
 
 local C = {}
@@ -89,16 +42,23 @@ end
 S.Camera = workspace.CurrentCamera
 S.Mouse = S.Player:GetMouse()
 S.PlayerGui = S.Player:WaitForChild("PlayerGui", 15)
-if not S.PlayerGui then
-	error("for the chosen: PlayerGui did not load")
+
+-- Modern Executor Parent Routing
+local function GetGuiParent()
+	local success, result = pcall(function()
+		if gethui then return gethui() end
+		return game:GetService("CoreGui")
+	end)
+	if success and result then return result end
+	return S.PlayerGui
 end
 
-local PreviousRuntime = S.PlayerGui:FindFirstChild("for the chosenGuiRuntime")
+local TargetParent = GetGuiParent()
+
+local PreviousRuntime = TargetParent:FindFirstChild("for the chosenGuiRuntime") or (S.PlayerGui and S.PlayerGui:FindFirstChild("for the chosenGuiRuntime"))
 if PreviousRuntime then
 	if PreviousRuntime:IsA("BindableFunction") then
-		pcall(function()
-			PreviousRuntime:Invoke()
-		end)
+		pcall(function() PreviousRuntime:Invoke() end)
 	end
 	PreviousRuntime:Destroy()
 end
@@ -131,11 +91,14 @@ C.DualFireReleaseTimeout = 2.5
 
 C.MenuKey = Enum.KeyCode.RightControl
 C.StreamerKey = Enum.KeyCode.F8
-C.PanicKey = Enum.KeyCode.M
 
 C.AimAssistKey = Enum.KeyCode.J
 C.AimAssistFOV = 100
 C.ShowAimAssistFOV = true
+
+C.HitboxExpanderEnabled = false
+C.HitboxSize = 5
+C.ShowHitbox = false
 
 C.TargetCursorWeight = 0.70
 C.TargetWorldDistanceWeight = 0.30
@@ -191,6 +154,8 @@ T.BorderBright = Color3.fromRGB(70, 70, 70)
 -- STATE
 --========================================================
 
+St.ConfigFolder = "for_the_chosen_configs"
+
 St.CameraLock = false
 St.Sequential = false
 St.Universal = true
@@ -210,6 +175,8 @@ St.NameESPEnabled = true
 St.NameESPTags = {}
 St.NameESPConnections = {}
 St.NameESPPending = {}
+St.OriginalHitboxSizes = {}
+St.HitboxBoxes = {}
 
 St.CameraLockTarget = nil
 St.SeqTarget = nil
@@ -239,13 +206,13 @@ St.KeyCapture = nil
 St.SlotCapture = nil
 St.Ready = false
 St.Cleaned = false
-St.Panicked = false
 St.Connections = {}
 St.CharacterConnections = {}
 St.CharacterGeneration = 0
 St.LearnSerial = 0
 St.ActiveTool = nil
 St.PendingToolReleases = setmetatable({}, {__mode = "k"})
+St.AnimatedGradients = {}
 
 if PreviousRuntime and S.Player.Character then
 	for _, Tool in ipairs(S.Player.Character:GetChildren()) do
@@ -309,6 +276,13 @@ S.OffSound.SoundId = "rbxassetid://124081596667728"
 S.OffSound.Volume = 1
 S.OffSound.Parent = S.SoundService
 
+-- Initialize file system folder
+if isfolder and makefolder then
+	pcall(function()
+		if not isfolder(St.ConfigFolder) then makefolder(St.ConfigFolder) end
+	end)
+end
+
 --========================================================
 -- LOGGING
 --========================================================
@@ -317,6 +291,24 @@ function F.Log(Text)
 	table.insert(St.Logs, 1, Text)
 	while #St.Logs > 6 do table.remove(St.Logs) end
 	if UI.Log then UI.Log.Text = table.concat(St.Logs, "\n") end
+end
+
+--========================================================
+-- GRADIENT HELPER
+--========================================================
+
+function F.ApplyAnimatedGradient(LabelObject)
+	local Gradient = Instance.new("UIGradient")
+	Gradient.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, T.RedBright),
+		ColorSequenceKeypoint.new(0.25, Color3.fromRGB(12, 12, 12)),
+		ColorSequenceKeypoint.new(0.5, T.RedBright),
+		ColorSequenceKeypoint.new(0.75, Color3.fromRGB(12, 12, 12)),
+		ColorSequenceKeypoint.new(1, T.RedBright),
+	})
+	Gradient.Parent = LabelObject
+	table.insert(St.AnimatedGradients, Gradient)
+	return Gradient
 end
 
 --========================================================
@@ -381,8 +373,8 @@ function F.PointerOverPanel()
 		and Point.Y >= Position.Y and Point.Y <= Position.Y + Size.Y
 end
 
-function F.CanInteract(AllowResume)
-	return St.Ready and not St.Cleaned and (AllowResume or not St.Panicked) and St.Focused
+function F.CanInteract()
+	return St.Ready and not St.Cleaned and St.Focused
 		and not S.UIS:GetFocusedTextBox() and not S.GuiService.MenuIsOpen
 		and not St.KeyCapture and not St.SlotCapture
 end
@@ -424,22 +416,6 @@ function F.PauseInput()
 	St.HeldCameraKey = nil
 end
 
-function F.Panic()
-	St.Panicked = true
-	St.KeyCapture = nil
-	St.SlotCapture = nil
-	F.PauseInput()
-	F.DisableCameraLock()
-	F.DisableSequential(false)
-	F.DisableUniversal(false, true)
-	F.SetAimAssist(false)
-	F.SetSpeed(false)
-	St.MenuOpen = false
-	if UI.Gui then UI.Gui.Enabled = false end
-	F.ApplyNameESPVisibility()
-	F.Log("Stopped / Right Control shows the panel; enable a control to resume")
-end
-
 function F.Cleanup()
 	if St.Cleaned then return end
 	St.Cleaned = true
@@ -459,6 +435,21 @@ function F.Cleanup()
 		Tag:Destroy()
 		St.NameESPTags[Player] = nil
 	end
+	
+	for Player, Orig in pairs(St.OriginalHitboxSizes) do
+		local Character = Player.Character
+		local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+		if Root and Root:IsA("BasePart") then
+			Root.Size = Orig.Size
+		end
+	end
+	table.clear(St.OriginalHitboxSizes)
+	
+	for _, Box in pairs(St.HitboxBoxes) do
+		Box:Destroy()
+	end
+	table.clear(St.HitboxBoxes)
+
 	St.Speed = false
 	St.HeldDualKey = nil
 	F.EndRangeFire()
@@ -480,7 +471,7 @@ function F.SetKey(Name, Key)
 		return false
 	end
 	for _, Other in ipairs({"CameraLockKey", "MenuKey", "StreamerKey",
-		"PanicKey", "SpeedKey", "AimAssistKey", "DualFireKey"}) do
+		"SpeedKey", "AimAssistKey", "DualFireKey"}) do
 		if Other ~= Name and C[Other] == Key then
 			F.Log(Key.Name .. " is already bound to " .. Other)
 			return false
@@ -620,7 +611,6 @@ function F.ApplySpeed()
 end
 
 function F.SetSpeed(Enabled)
-	if Enabled then St.Panicked = false end
 	St.Speed = Enabled == true
 	F.ApplySpeed()
 	F.Log(St.Speed and ("Speed ON / " .. tostring(C.WalkSpeed)) or "Speed OFF")
@@ -754,6 +744,65 @@ function F.ImportTargetsJson(text)
 	if F.RefreshTargetsPage then F.RefreshTargetsPage() end
 	if F.Refresh then F.Refresh() end
 	return true, "Merged " .. tostring(added) .. " new targets successfully!"
+end
+
+function F.ExportConfig()
+	local data = {}
+	for k, v in pairs(C) do
+		if k == "NumberKeys" or k == "KeyByName" then continue end
+		if typeof(v) == "EnumItem" then
+			data[k] = {__isEnum = true, Type = tostring(v.EnumType), Name = v.Name}
+		elseif typeof(v) == "table" then
+			local tbl = {}
+			for tk, tv in pairs(v) do tbl[tk] = tv end
+			data[k] = tbl
+		else
+			data[k] = v
+		end
+	end
+	local success, res = pcall(S.HttpService.JSONEncode, S.HttpService, data)
+	return success and res or "{}"
+end
+
+function F.ImportConfig(json)
+	local success, data = pcall(S.HttpService.JSONDecode, S.HttpService, json)
+	if not success or type(data) ~= "table" then return false, "Invalid JSON format" end
+
+	for k, v in pairs(data) do
+		if C[k] ~= nil then
+			if type(v) == "table" and v.__isEnum then
+				pcall(function() C[k] = Enum[v.Type][v.Name] end)
+			elseif type(v) == "table" and type(C[k]) == "table" then
+				for tk, tv in pairs(v) do C[k][tk] = tv end
+			else
+				C[k] = v
+			end
+		end
+	end
+	return true, "Configuration loaded successfully."
+end
+
+function F.SaveConfigToFile(name)
+	if not writefile then return false, "Executor does not support file saving" end
+	name = name:gsub("[^%w%-_]", "")
+	if name == "" then return false, "Invalid filename" end
+	
+	local json = F.ExportConfig()
+	local path = St.ConfigFolder .. "/" .. name .. ".json"
+	
+	local success, err = pcall(function() writefile(path, json) end)
+	return success, success and ("Saved to " .. St.ConfigFolder .. "/" .. name) or "Failed to save file"
+end
+
+function F.LoadConfigFromFile(name)
+	if not readfile then return false, "Executor does not support file reading" end
+	name = name:gsub("[^%w%-_]", "")
+	local path = St.ConfigFolder .. "/" .. name .. ".json"
+	
+	local success, content = pcall(function() return readfile(path) end)
+	if not success then return false, "File not found on PC" end
+	
+	return F.ImportConfig(content)
 end
 
 function F.IsKnifeTool(Tool)
@@ -891,7 +940,6 @@ function F.BeginDualFire(Automatic)
 		Notice("DB + TAC: both guns need ammo and must be ready")
 		return false
 	end
-	St.Panicked = false
 	F.ReleaseTool()
 	local Now = os.clock()
 	local RepeatDelay = Automatic and math.max(C.DualFireCooldown, C.ShotCooldown) or C.DualFireCooldown
@@ -1165,6 +1213,67 @@ function F.CharacterFromPart(Part)
 	return nil, nil
 end
 
+--========================================================
+-- HITBOX OVERRIDE SUITE
+--========================================================
+
+function F.UpdateHitboxes()
+	for _, Player in ipairs(S.Players:GetPlayers()) do
+		if Player == S.Player then continue end
+		local Character = Player.Character
+		local Root = Character and Character:FindFirstChild("HumanoidRootPart")
+
+		if not Root or not Root:IsA("BasePart") then
+			if St.HitboxBoxes[Player] then
+				St.HitboxBoxes[Player]:Destroy()
+				St.HitboxBoxes[Player] = nil
+			end
+			continue
+		end
+
+		if not St.OriginalHitboxSizes[Player] then
+			St.OriginalHitboxSizes[Player] = {Size = Root.Size}
+		end
+
+		local Orig = St.OriginalHitboxSizes[Player]
+		local IsTarget = F.BasicTarget(Player, Character) and F.TargetSelected(Player)
+		local Box = St.HitboxBoxes[Player]
+
+		if IsTarget then
+			if C.HitboxExpanderEnabled then
+				Root.Size = Vector3.new(C.HitboxSize, C.HitboxSize, C.HitboxSize)
+			else
+				if Root.Size ~= Orig.Size then
+					Root.Size = Orig.Size
+				end
+			end
+
+			if C.ShowHitbox and not St.StreamerMode then
+				if not Box then
+					Box = Instance.new("BoxHandleAdornment")
+					Box.Name = "for the chosenHitboxVis"
+					Box.AlwaysOnTop = true
+					Box.ZIndex = 5
+					Box.Transparency = 0.5
+					Box.Color3 = T.RedBright
+					Box.Parent = TargetParent
+					St.HitboxBoxes[Player] = Box
+				end
+				Box.Adornee = Root
+				Box.Size = Root.Size
+				Box.Visible = true
+			else
+				if Box then Box.Visible = false end
+			end
+		else
+			if Root.Size ~= Orig.Size then
+				Root.Size = Orig.Size
+			end
+			if Box then Box.Visible = false end
+		end
+	end
+end
+
 function F.CursorTarget(Tool, RangeOverride)
 	local Camera = workspace.CurrentCamera
 	local Mine = S.Player.Character
@@ -1199,7 +1308,7 @@ function F.TriggerTarget(Tool, RangeOverride)
 	for _, Player in ipairs(S.Players:GetPlayers()) do
 		local Character = Player.Character
 		if Character ~= CursorCharacter or not F.TargetSelected(Player) or not F.BasicTarget(Player, Character) then continue end
-		local Part = F.CameraLockBodyPart(Character)
+		local Part = Character:FindFirstChild("UpperTorso") or Character:FindFirstChild("Torso") or Character:FindFirstChild("HumanoidRootPart")
 		local TheirRoot = Character:FindFirstChild("HumanoidRootPart")
 		if not Part or not TheirRoot or not TheirRoot:IsA("BasePart") or (TheirRoot.Position - Root.Position).Magnitude > Range then continue end
 		local Point, Visible = Camera:WorldToViewportPoint(Part.Position)
@@ -1290,7 +1399,6 @@ function F.FindCameraLockTarget()
 end
 
 function F.EnableCameraLock()
-	St.Panicked = false
 	if F.SelectedTargetCount() <= 0 then
 		St.CameraLock = false
 		St.CameraLockTarget = nil
@@ -1383,7 +1491,6 @@ function F.FindAimAssistTarget(Tool)
 end
 
 function F.SetAimAssist(Enabled)
-	if Enabled then St.Panicked = false end
 	St.LastAimScan = 0
 	St.AimAssist = Enabled == true
 	if not St.AimAssist then St.AimAssistTarget = nil end
@@ -1404,7 +1511,7 @@ function F.UpdateAimAssist()
 	local Cursor = S.UIS:GetMouseLocation()
 	UI.AimAssistFOV.Size = UDim2.fromOffset(C.AimAssistFOV * 2, C.AimAssistFOV * 2)
 	UI.AimAssistFOV.Position = UDim2.fromOffset(Cursor.X, Cursor.Y)
-	UI.AimAssistFOV.Visible = St.AimAssist and C.ShowAimAssistFOV and not St.StreamerMode and not St.Panicked
+	UI.AimAssistFOV.Visible = St.AimAssist and C.ShowAimAssistFOV and not St.StreamerMode
 	local Tool = F.EquippedTool()
 	if not St.AimAssist or not F.CanInteract() or F.PointerOverPanel() or St.CameraLock or not F.Alive(S.Player.Character) or not F.ToolReady(Tool) then
 		St.AimAssistTarget = nil
@@ -1641,7 +1748,6 @@ end
 
 function F.EnableUniversal()
 	F.DisableSequential(false)
-	St.Panicked = false
 	St.Universal = true
 	St.RangeRetryAt = 0
 	St.RangeLastNotice = nil
@@ -1747,7 +1853,7 @@ function F.NameESPColor(Player)
 end
 
 function F.NameESPVisible(Player)
-	return St.NameESPEnabled and not St.StreamerMode and not St.Panicked
+	return St.NameESPEnabled and not St.StreamerMode
 		and Player ~= nil and Player ~= S.Player and Player.Parent == S.Players
 		and (F.TargetSelected(Player) or not F.Crew(Player))
 end
@@ -1803,7 +1909,7 @@ function F.CreateNameESPTag(Player, Character, Head)
 	Tag.AlwaysOnTop = true
 	Tag.ResetOnSpawn = false
 	Tag.Enabled = F.NameESPVisible(Player)
-	Tag.Parent = S.PlayerGui
+	Tag.Parent = TargetParent
 
 	local Label = Instance.new("TextLabel")
 	Label.Name = "NameLabel"
@@ -1825,7 +1931,9 @@ function F.EnsureNameESP(Player, Character)
 	if St.Cleaned or not Player or Player == S.Player or not Player.Parent then return end
 	Character = Character or Player.Character
 	if not Character or Character ~= Player.Character then return end
+	
 	if F.UpdateNameESPTag(Player) then return end
+	
 	if St.NameESPPending[Player] == Character then return end
 	St.NameESPPending[Player] = Character
 	task.spawn(function()
@@ -1858,6 +1966,11 @@ function F.StartNameESP()
 		St.NameESPPending[Player] = nil
 		St.CrewCache[Player] = nil
 		F.RemoveNameESP(Player)
+		St.OriginalHitboxSizes[Player] = nil
+		if St.HitboxBoxes and St.HitboxBoxes[Player] then
+			St.HitboxBoxes[Player]:Destroy()
+			St.HitboxBoxes[Player] = nil
+		end
 	end)
 	for _, Player in ipairs(S.Players:GetPlayers()) do F.BindNameESPPlayer(Player) end
 	local LastReconcile = 0
@@ -1869,7 +1982,7 @@ function F.StartNameESP()
 		if Now - LastReconcile < 1 then return end
 		LastReconcile = Now
 		for _, Player in ipairs(S.Players:GetPlayers()) do
-			F.UpdateNameESPTag(Player)
+			F.EnsureNameESP(Player)
 		end
 	end)
 end
@@ -1901,167 +2014,6 @@ function F.ToggleStreamerMode()
 	St.StreamerMode = not St.StreamerMode
 	F.ApplyNameESPVisibility()
 	F.Log(St.StreamerMode and "Streamer mode ON (ESP hidden)" or "Streamer mode OFF (ESP shown)")
-end
-
-function F.ExportConfig()
-	local Learned = {}
-	local SelectedTargetUserIds = {}
-	for UserId, Selected in pairs(St.SelectedTargets) do
-		if Selected == true then table.insert(SelectedTargetUserIds, tostring(UserId)) end
-	end
-	for Slot, Name in pairs(St.LearnedSlots) do Learned[tostring(Slot)] = Name end
-	return S.HttpService:JSONEncode({
-		version = 45,
-		dualFire = {
-			db = C.DualFireDBName, tac = C.DualFireTacName,
-			repeatDelayMs = C.DualFireCooldown * 1000,
-			equipDelayMs = C.DualFireEquipDelay * 1000,
-			postShotHoldMs = C.DualFirePostShotHold * 1000,
-		},
-		nameESP = {enabled = St.NameESPEnabled},
-		trigger = {enabled = St.Universal, autoRange = C.RangeAuto, revolver = C.RangeRevName,
-			fovEnabled = C.TriggerFOVEnabled, fovSize = C.TriggerFOVSize, showFov = C.ShowTriggerFOV},
-		movementFeatures = {
-			wallJump = C.WallJumpEnabled,
-			rapidFire = C.RapidFireEnabled
-		},
-		keys = {
-			dualFire = C.DualFireKey.Name,
-			cameralock = C.CameraLockKey.Name,
-			sequential = C.SequentialKey.Name,
-			menu = C.MenuKey.Name,
-			streamer = C.StreamerKey.Name,
-			panic = C.PanicKey.Name,
-			speed = C.SpeedKey.Name,
-			aimAssist = C.AimAssistKey.Name
-		},
-		hold = {
-			cameralock = C.HoldCameraLock,
-			sequential = C.HoldSequential
-		},
-		timing = {
-			shotCooldown = C.ShotCooldown - 1000,
-			uiRefresh = C.UIRefresh - 1000,
-			triggerKnifeCheck = C.TriggerKnifeCheck
-		},
-		aimAssist = {
-			enabled = St.AimAssist,
-			fov = C.AimAssistFOV,
-			showFov = C.ShowAimAssistFOV
-		},
-		movement = {
-			speedEnabled = St.Speed,
-			walkSpeed = C.WalkSpeed,
-		},
-		distance = C.Distance,
-		sequence = St.Sequence,
-		universalSlot = C.UniversalSlot,
-		targetSelection = {userIds = SelectedTargetUserIds},
-		learnedSlots = Learned
-	})
-end
-
-function F.ImportConfig(Text)
-	if typeof(Text) ~= "string" or #Text > 262144 then return false, "Config must be JSON text under 256 KB" end
-	local Success, Data = pcall(S.HttpService.JSONDecode, S.HttpService, Text)
-	if not Success or typeof(Data) ~= "table" then return false, "Invalid JSON" end
-	local function Section(Name) return typeof(Data[Name]) == "table" and Data[Name] or {} end
-	local function Number(Value, Min, Max, Default)
-		local Parsed = F.FiniteNumber(Value)
-		return Parsed and math.clamp(Parsed, Min, Max) or Default
-	end
-	local function Boolean(Value, Default)
-		if typeof(Value) == "boolean" then return Value end
-		return Default
-	end
-	local KeyFields = {cameralock = "CameraLockKey", menu = "MenuKey", streamer = "StreamerKey", panic = "PanicKey", speed = "SpeedKey", aimAssist = "AimAssistKey", dualFire = "DualFireKey"}
-	local Keys, NewKeys, Used = Section("keys"), {}, {}
-	for JsonKey, ConfigKey in pairs(KeyFields) do
-		local Value = Keys[JsonKey]
-		if JsonKey == "cameralock" and Value == nil then Value = Keys.camlock end
-		local Key = C[ConfigKey]
-		if Value ~= nil then Key = typeof(Value) == "string" and C.KeyByName[Value] or nil end
-		if not Key or Key == Enum.KeyCode.Unknown or Key == Enum.KeyCode.Escape then return false, "Invalid keybind: " .. JsonKey end
-		if Used[Key] then return false, "Duplicate keybind: " .. Key.Name end
-		Used[Key] = true
-		NewKeys[ConfigKey] = Key
-	end
-	F.PauseInput()
-	for Name, Key in pairs(NewKeys) do C[Name] = Key end
-	local Dual = Section("dualFire")
-	C.DualFireCooldown = Number(Dual.repeatDelayMs, 0, 3000, C.DualFireCooldown * 1000) / 1000
-	C.DualFireEquipDelay = Number(Dual.equipDelayMs, 0, 1000, C.DualFireEquipDelay * 1000) / 1000
-	C.DualFirePostShotHold = Number(Dual.postShotHoldMs, 0, 1500, C.DualFirePostShotHold * 1000) / 1000
-	for Field, Setting in pairs({db = "DualFireDBName", tac = "DualFireTacName"}) do
-		local Value = Dual[Field]
-		if typeof(Value) == "string" and #Value <= 256 then
-			local Trimmed = string.match(Value, "^%s*(.-)%s*$")
-			if Trimmed ~= "" then C[Setting] = Trimmed end
-		end
-	end
-	local Trigger = Section("trigger")
-	C.RangeAuto = Boolean(Trigger.autoRange, C.RangeAuto)
-	C.TriggerFOVEnabled = Boolean(Trigger.fovEnabled, C.TriggerFOVEnabled)
-	C.TriggerFOVSize = math.floor(Number(Trigger.fovSize, 20, 1200, C.TriggerFOVSize) + 0.5)
-	C.ShowTriggerFOV = Boolean(Trigger.showFov, C.ShowTriggerFOV)
-	if typeof(Trigger.revolver) == "string" and #Trigger.revolver <= 256 then
-		local Name = string.match(Trigger.revolver, "^%s*(.-)%s*$")
-		if Name ~= "" then C.RangeRevName = Name end
-	end
-	local MovFeat = Section("movementFeatures")
-	C.WallJumpEnabled = Boolean(MovFeat.wallJump, C.WallJumpEnabled)
-	C.RapidFireEnabled = Boolean(MovFeat.rapidFire, C.RapidFireEnabled)
-
-	local Hold = Section("hold")
-	local CameraHold = Hold.cameralock
-	if CameraHold == nil then CameraHold = Hold.camlock end
-	C.HoldCameraLock = Boolean(CameraHold, C.HoldCameraLock)
-	F.DisableCameraLock()
-	local Timing = Section("timing")
-	C.ShotCooldown = Number(Timing.shotCooldown, 1, 1000, C.ShotCooldown * 1000) / 1000
-	C.UIRefresh = Number(Timing.uiRefresh, 50, 1000, C.UIRefresh * 1000) / 1000
-	C.TriggerKnifeCheck = Boolean(Timing.triggerKnifeCheck, C.TriggerKnifeCheck)
-	local Aim = Section("aimAssist")
-	C.AimAssistFOV = Number(Aim.fov, 25, 500, C.AimAssistFOV)
-	C.ShowAimAssistFOV = Boolean(Aim.showFov, C.ShowAimAssistFOV)
-	local Movement = Section("movement")
-	C.WalkSpeed = Number(Movement.walkSpeed, 1, 100, C.WalkSpeed)
-	local Distance = Section("distance")
-	for Name, Old in pairs(C.Distance) do C.Distance[Name] = Number(Distance[Name], 1, 5000, Old) end
-	if typeof(Data.learnedSlots) == "table" then
-		table.clear(St.LearnedSlots)
-		for SlotText, Name in pairs(Data.learnedSlots) do
-			local Slot = F.FiniteNumber(SlotText)
-			if Slot and Slot % 1 == 0 and Slot >= 1 and Slot <= 9 and typeof(Name) == "string" then
-				St.LearnedSlots[Slot] = Name
-			end
-		end
-	end
-	if typeof(Data.sequence) == "table" then
-		St.Sequence = {math.floor(Number(Data.sequence[1], 1, 9, St.Sequence[1] or 1))}
-	end
-	C.UniversalSlot = math.floor(Number(Data.universalSlot, 1, 9, C.UniversalSlot))
-	local Selection = Section("targetSelection")
-	if typeof(Selection.userIds) == "table" then
-		table.clear(St.SelectedTargets)
-		for _, Raw in ipairs(Selection.userIds) do
-			local UserId = F.FiniteNumber(Raw)
-			if UserId and UserId % 1 == 0 and UserId ~= 0 and UserId ~= S.Player.UserId then
-				St.SelectedTargets[UserId] = true
-			end
-		end
-	end
-	St.AimAssistTarget = nil
-	St.LastAimScan = 0
-	St.NameESPEnabled = Boolean(Section("nameESP").enabled, St.NameESPEnabled)
-	F.ApplyNameESPVisibility()
-	F.SetAimAssist(Boolean(Aim.enabled, St.AimAssist))
-	F.SetSpeed(Boolean(Movement.speedEnabled, St.Speed))
-	local TriggerEnabled = Boolean(Section("trigger").enabled, St.Universal)
-	F.SetUniversal(TriggerEnabled)
-	F.RefreshTargetsPage()
-	F.Refresh()
-	return true, "Config imported"
 end
 
 function F.Round(Object, Radius)
@@ -2153,7 +2105,7 @@ function F.BuildBaseUI()
 	local PlayerGui = S.Player:FindFirstChildOfClass("PlayerGui") or S.Player:WaitForChild("PlayerGui", 10)
 	if not PlayerGui then error("PlayerGui did not load within 10 seconds") end
 	for _, Name in ipairs({"for the chosensGUI"}) do
-		local Old = PlayerGui:FindFirstChild(Name)
+		local Old = TargetParent:FindFirstChild(Name)
 		if Old then Old:Destroy() end
 	end
 	UI.Gui = Instance.new("ScreenGui")
@@ -2163,7 +2115,7 @@ function F.BuildBaseUI()
 	UI.Gui.DisplayOrder = 50
 	UI.Gui.AutoLocalize = false
 	UI.Gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	UI.Gui.Parent = PlayerGui
+	UI.Gui.Parent = TargetParent
 	F.Connect(UI.Gui.Destroying, F.Cleanup)
 
 	UI.AimAssistFOV = Instance.new("Frame")
@@ -2205,6 +2157,7 @@ function F.BuildBaseUI()
 
 	UI.Title = F.Label(UI.Top, "for the chosen", UDim2.fromOffset(270, 28), UDim2.fromOffset(20, 15), 16, T.RedBright)
 	UI.Title.Font = Enum.Font.GothamBold
+	F.ApplyAnimatedGradient(UI.Title)
 
 	UI.Minimize = F.Button(UI.Top, "—", UDim2.fromOffset(30, 28), UDim2.new(1, -72, 0, 17))
 	UI.Close = F.Button(UI.Top, "×", UDim2.fromOffset(30, 28), UDim2.new(1, -37, 0, 17))
@@ -2297,6 +2250,7 @@ function F.BuildWelcomePage()
 	
 	local Header = F.Label(UI.WelcomePage, "Welcome", UDim2.fromOffset(350, 26), UDim2.fromOffset(0, 0), 18)
 	Header.Font = Enum.Font.GothamBold
+	F.ApplyAnimatedGradient(Header)
 	F.Label(UI.WelcomePage, "Your local identity overview and live performance metrics.", UDim2.fromOffset(450, 18), UDim2.fromOffset(0, 28), 9, T.Muted)
 
 	local Card = Instance.new("Frame")
@@ -2324,10 +2278,10 @@ function F.BuildWelcomePage()
 
 	local DisplayLabel = F.Label(Card, S.Player.DisplayName, UDim2.fromOffset(300, 30), UDim2.fromOffset(144, 34), 24, T.RedBright)
 	DisplayLabel.Font = Enum.Font.GothamBold
+	F.ApplyAnimatedGradient(DisplayLabel)
 
 	local UserLabel = F.Label(Card, "@" .. S.Player.Name, UDim2.fromOffset(300, 20), UDim2.fromOffset(144, 68), 14, T.Muted)
 
-	-- Animated "Chosen One" Banner
 	local ChosenBox = Instance.new("Frame")
 	ChosenBox.Size = UDim2.new(1, -48, 0, 54)
 	ChosenBox.Position = UDim2.fromOffset(24, 140)
@@ -2340,19 +2294,8 @@ function F.BuildWelcomePage()
 	local ChosenText = F.Label(ChosenBox, "You are the chosen one, " .. S.Player.DisplayName, UDim2.new(1, 0, 1, 0), UDim2.new(0, 0, 0, 0), 16, Color3.fromRGB(255, 255, 255))
 	ChosenText.Font = Enum.Font.GothamBold
 	ChosenText.TextXAlignment = Enum.TextXAlignment.Center
+	F.ApplyAnimatedGradient(ChosenText)
 
-	local Gradient = Instance.new("UIGradient")
-	Gradient.Color = ColorSequence.new({
-		ColorSequenceKeypoint.new(0, T.RedBright),
-		ColorSequenceKeypoint.new(0.25, Color3.fromRGB(12, 12, 12)),
-		ColorSequenceKeypoint.new(0.5, T.RedBright),
-		ColorSequenceKeypoint.new(0.75, Color3.fromRGB(12, 12, 12)),
-		ColorSequenceKeypoint.new(1, T.RedBright),
-	})
-	Gradient.Parent = ChosenText
-	UI.ChosenGradient = Gradient
-
-	-- Performance Stats Cards Section
 	local StatsContainer = Instance.new("Frame")
 	StatsContainer.Size = UDim2.new(1, -48, 0, 120)
 	StatsContainer.Position = UDim2.fromOffset(24, 208)
@@ -2380,6 +2323,7 @@ function F.BuildWelcomePage()
 
 		local Value = F.Label(Box, "--", UDim2.new(1, -16, 0, 32), UDim2.fromOffset(12, 36), 20, T.RedBright)
 		Value.Font = Enum.Font.GothamBold
+		F.ApplyAnimatedGradient(Value)
 
 		local Subtitle = F.Label(Box, "Updating...", UDim2.new(1, -16, 0, 18), UDim2.fromOffset(12, 74), 9, T.Muted)
 		Subtitle.Font = Enum.Font.GothamMedium
@@ -2396,6 +2340,7 @@ function F.BuildStatusPage()
 	UI.StatusPage = F.MakePage("Status")
 	local Header = F.Label(UI.StatusPage, "Runtime overview", UDim2.fromOffset(360, 26), UDim2.fromOffset(0, 0), 18)
 	Header.Font = Enum.Font.GothamBold
+	F.ApplyAnimatedGradient(Header)
 	F.Label(UI.StatusPage, "Live state for targeting, weapons and input.", UDim2.fromOffset(450, 18), UDim2.fromOffset(0, 28), 9, T.Muted)
 
 	local function StatusCard(X, Y, W, H)
@@ -2438,6 +2383,7 @@ end
 function F.BuildSequencePage()
 	UI.SequencePage = F.MakePage("Sequence")
 	UI.SequenceScroll = F.Scroll(UI.SequencePage)
+	UI.SettingRefreshers = UI.SettingRefreshers or {}
 	local Order = 0
 	local function Next() Order += 1; return Order end
 
@@ -2449,6 +2395,7 @@ function F.BuildSequencePage()
 
 	local HeaderText = F.Label(Header, "Trigger control", UDim2.fromOffset(350, 24), UDim2.fromOffset(0, 0), 18)
 	HeaderText.Font = Enum.Font.GothamBold
+	F.ApplyAnimatedGradient(HeaderText)
 	F.Label(Header, "Aim at a selected target inside the square to trigger. Equip REV yourself; Q aims.", UDim2.new(1, 0, 0, 18), UDim2.fromOffset(0, 29), 9, T.Muted)
 
 	local function Section(Text)
@@ -2459,6 +2406,7 @@ function F.BuildSequencePage()
 		Frame.Parent = UI.SequenceScroll
 		local Label = F.Label(Frame, Text, UDim2.new(1, 0, 1, 0), UDim2.new(), 10, T.RedBright)
 		Label.Font = Enum.Font.GothamBold
+		F.ApplyAnimatedGradient(Label)
 		return Frame
 	end
 
@@ -2501,7 +2449,7 @@ function F.BuildSequencePage()
 	Buttons.Visible = false
 
 	UI.AddWeapon = F.Button(Buttons, "", UDim2.fromOffset(155, 34), UDim2.fromOffset(0, 4))
-	UI.RemoveWeapon = F.Button(Buttons, "", UDim2.fromOffset(155, 34), UDim2.fromOffset(165, 4))
+	UI.RemoveWeapon = F.Button(Buttons, "", UDim2.fromOffset(155, 34), UDim2.new(1, -155, 0, 4))
 
 	local Info = F.Card(UI.SequenceScroll, 68)
 	Info.LayoutOrder = Next()
@@ -2509,6 +2457,117 @@ function F.BuildSequencePage()
 	Info.Visible = false
 	UI.SequenceInfo = F.Label(Info, "", UDim2.new(1, -24, 1, -20), UDim2.fromOffset(12, 10), 9, T.Muted)
 	UI.SequenceInfo.TextWrapped = true
+
+	Section("TARGET HITBOX OVERRIDE")
+
+	local OverrideCard = F.Card(UI.SequenceScroll, 66)
+	OverrideCard.LayoutOrder = Next()
+	local TitleLabel = F.Label(OverrideCard, "Enable hitbox override", UDim2.fromOffset(320, 20), UDim2.fromOffset(13, 10), 11)
+	TitleLabel.Font = Enum.Font.GothamSemibold
+	F.Label(OverrideCard, "Expands physical target hitboxes to intercept trigger rays earlier.", UDim2.new(1, -180, 0, 24), UDim2.fromOffset(13, 35), 9, T.Muted)
+	local OverrideState = F.Button(OverrideCard, "OFF", UDim2.fromOffset(92, 34), UDim2.new(1, -107, 0, 16))
+	
+	local function RefreshOverride()
+		if C.HitboxExpanderEnabled then
+			OverrideState.Text = "ENABLED"
+			OverrideState.TextColor3 = T.RedBright
+			OverrideState.BackgroundColor3 = T.RedDark
+		else
+			OverrideState.Text = "OFF"
+			OverrideState.TextColor3 = T.Muted
+			OverrideState.BackgroundColor3 = T.Panel2
+		end
+	end
+	table.insert(UI.SettingRefreshers, RefreshOverride)
+	OverrideState.MouseButton1Click:Connect(function()
+		C.HitboxExpanderEnabled = not C.HitboxExpanderEnabled
+		RefreshOverride()
+	end)
+	RefreshOverride()
+
+	local VisCard = F.Card(UI.SequenceScroll, 66)
+	VisCard.LayoutOrder = Next()
+	local VisTitle = F.Label(VisCard, "Hitbox visualizer", UDim2.fromOffset(320, 20), UDim2.fromOffset(13, 10), 11)
+	VisTitle.Font = Enum.Font.GothamSemibold
+	F.Label(VisCard, "Shows a red translucent glowing box around targets.", UDim2.new(1, -180, 0, 24), UDim2.fromOffset(13, 35), 9, T.Muted)
+	local VisState = F.Button(VisCard, "OFF", UDim2.fromOffset(92, 34), UDim2.new(1, -107, 0, 16))
+	
+	local function RefreshVis()
+		if C.ShowHitbox then
+			VisState.Text = "ENABLED"
+			VisState.TextColor3 = T.RedBright
+			VisState.BackgroundColor3 = T.RedDark
+		else
+			VisState.Text = "OFF"
+			VisState.TextColor3 = T.Muted
+			VisState.BackgroundColor3 = T.Panel2
+		end
+	end
+	table.insert(UI.SettingRefreshers, RefreshVis)
+	VisState.MouseButton1Click:Connect(function()
+		C.ShowHitbox = not C.ShowHitbox
+		RefreshVis()
+	end)
+	RefreshVis()
+
+	local SliderCard = F.Card(UI.SequenceScroll, 66)
+	SliderCard.LayoutOrder = Next()
+	local SliderTitle = F.Label(SliderCard, "Hitbox size", UDim2.fromOffset(320, 20), UDim2.fromOffset(13, 10), 11)
+	SliderTitle.Font = Enum.Font.GothamSemibold
+	local SliderVal = F.Label(SliderCard, tostring(C.HitboxSize), UDim2.fromOffset(50, 20), UDim2.new(1, -63, 0, 10), 11, T.RedBright)
+	SliderVal.TextXAlignment = Enum.TextXAlignment.Right
+	SliderVal.Font = Enum.Font.GothamBold
+	F.ApplyAnimatedGradient(SliderVal)
+
+	local SliderBG = Instance.new("Frame")
+	SliderBG.Size = UDim2.new(1, -26, 0, 6)
+	SliderBG.Position = UDim2.fromOffset(13, 42)
+	SliderBG.BackgroundColor3 = T.Panel2
+	SliderBG.BorderSizePixel = 0
+	SliderBG.Parent = SliderCard
+	F.Round(SliderBG, 3)
+
+	local SliderFill = Instance.new("Frame")
+	SliderFill.Size = UDim2.fromScale(math.clamp((C.HitboxSize - 2) / 18, 0, 1), 1)
+	SliderFill.BackgroundColor3 = T.RedBright
+	SliderFill.BorderSizePixel = 0
+	SliderFill.Parent = SliderBG
+	F.Round(SliderFill, 3)
+
+	local DragButton = Instance.new("TextButton")
+	DragButton.Size = UDim2.fromScale(1, 1)
+	DragButton.Position = UDim2.fromOffset(0, 0)
+	DragButton.BackgroundTransparency = 1
+	DragButton.Text = ""
+	DragButton.Parent = SliderBG
+
+	local dragging = false
+	local function UpdateSlider(input)
+		local pos = math.clamp((input.Position.X - SliderBG.AbsolutePosition.X) / SliderBG.AbsoluteSize.X, 0, 1)
+		local value = math.floor(2 + 18 * pos + 0.5)
+		C.HitboxSize = value
+		SliderFill.Size = UDim2.fromScale(pos, 1)
+		SliderVal.Text = tostring(value)
+	end
+
+	DragButton.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			UpdateSlider(input)
+		end
+	end)
+
+	S.UIS.InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			UpdateSlider(input)
+		end
+	end)
+
+	S.UIS.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
 end
 
 function F.RefreshTargetsPage()
@@ -2551,6 +2610,7 @@ function F.BuildTargetsPage()
 
 	local HeaderText = F.Label(Header, "Target selection & share", UDim2.fromOffset(350, 24), UDim2.fromOffset(0, 0), 18)
 	HeaderText.Font = Enum.Font.GothamBold
+	F.ApplyAnimatedGradient(HeaderText)
 	F.Label(Header, "Export your target list code or paste a friend's target list below to merge missing targets.", UDim2.new(1, 0, 0, 18), UDim2.fromOffset(0, 30), 9, T.Muted)
 
 	local ShareCard = F.Card(UI.TargetsScroll, 110)
@@ -2631,7 +2691,7 @@ end
 function F.BuildSettingsPage()
 	UI.SettingsPage = F.MakePage("Settings")
 	UI.SettingsScroll = F.Scroll(UI.SettingsPage)
-	UI.SettingRefreshers = {}
+	UI.SettingRefreshers = UI.SettingRefreshers or {}
 	local Order = 0
 	local function Next() Order += 1; return Order end
 
@@ -2643,6 +2703,7 @@ function F.BuildSettingsPage()
 		Frame.Parent = UI.SettingsScroll
 		local Label = F.Label(Frame, Text, UDim2.new(1, 0, 1, 0), UDim2.new(), 10, T.RedBright)
 		Label.Font = Enum.Font.GothamBold
+		F.ApplyAnimatedGradient(Label)
 	end
 
 	local function SettingCard(Name, Description)
@@ -2737,7 +2798,6 @@ function F.BuildSettingsPage()
 	KeySetting("CameraLock key", "Toggles CameraLock. The camera follows the selected target's body.", function() return C.CameraLockKey end, function(Key) F.SetKey("CameraLockKey", Key) end)
 	KeySetting("Menu key", "Opens and closes the menu.", function() return C.MenuKey end, function(Key) F.SetKey("MenuKey", Key) end)
 	KeySetting("Streamer mode", "Toggles streamer mode.", function() return C.StreamerKey end, function(Key) F.SetKey("StreamerKey", Key) end)
-	KeySetting("Panic key", "Disables runtime systems and hides the GUI.", function() return C.PanicKey end, function(Key) F.SetKey("PanicKey", Key) end)
 	KeySetting("Speed key", "Toggles the local walk-speed override.", function() return C.SpeedKey end, function(Key) F.SetKey("SpeedKey", Key) end)
 	KeySetting("Aim assist key", "Toggles local camera aim assist for selected targets.", function() return C.AimAssistKey end, function(Key) F.SetKey("AimAssistKey", Key) end)
 
@@ -2780,71 +2840,103 @@ function F.BuildSettingsPage()
 	end
 end
 
+function F.RefreshConfigList()
+	if not UI.ConfigListScroll then return end
+	for _, child in ipairs(UI.ConfigListScroll:GetChildren()) do
+		if child.Name == "ConfigRow" then child:Destroy() end
+	end
+
+	if not isfolder or not listfiles then return end
+	
+	local files = {}
+	pcall(function() files = listfiles(St.ConfigFolder) end)
+
+	local LayoutOrder = 1
+	for _, path in ipairs(files) do
+		local filename = path:match("([^/\\]+)%.json$")
+		if not filename then continue end
+
+		local Row = F.Card(UI.ConfigListScroll, 50)
+		Row.Name = "ConfigRow"
+		Row.LayoutOrder = LayoutOrder
+		LayoutOrder += 1
+
+		local NameLabel = F.Label(Row, filename, UDim2.new(1, -150, 0, 20), UDim2.fromOffset(14, 15), 11)
+		NameLabel.Font = Enum.Font.GothamSemibold
+
+		local LoadBtn = F.Button(Row, "LOAD", UDim2.fromOffset(70, 28), UDim2.new(1, -165, 0, 11))
+		LoadBtn.TextColor3 = T.Green
+		
+		LoadBtn.MouseButton1Click:Connect(function()
+			local success, msg = F.LoadConfigFromFile(filename)
+			UI.ConfigStatus.Text = msg
+			UI.ConfigStatus.TextColor3 = success and T.Green or T.RedBright
+			if success then
+				for _, Refresh in ipairs(UI.SettingRefreshers or {}) do Refresh() end
+				F.Log("Loaded local config: " .. filename)
+				F.Refresh()
+			end
+		end)
+
+		local DelBtn = F.Button(Row, "DELETE", UDim2.fromOffset(70, 28), UDim2.new(1, -85, 0, 11))
+		DelBtn.TextColor3 = T.RedBright
+		
+		DelBtn.MouseButton1Click:Connect(function()
+			pcall(function() delfile(St.ConfigFolder .. "/" .. filename .. ".json") end)
+			UI.ConfigStatus.Text = "Deleted " .. filename
+			UI.ConfigStatus.TextColor3 = T.Muted
+			F.RefreshConfigList()
+		end)
+	end
+end
+
 function F.BuildConfigPage()
 	UI.ConfigPage = F.MakePage("Config")
-	local Title = F.Label(UI.ConfigPage, "Config transfer", UDim2.fromOffset(350, 25), UDim2.fromOffset(0, 0), 18)
+	local Title = F.Label(UI.ConfigPage, "Configuration manager", UDim2.fromOffset(350, 25), UDim2.fromOffset(0, 0), 18)
 	Title.Font = Enum.Font.GothamBold
-	F.Label(UI.ConfigPage, "Export settings as JSON or paste a previous config to restore it.", UDim2.fromOffset(520, 18), UDim2.fromOffset(0, 28), 9, T.Muted)
+	F.ApplyAnimatedGradient(Title)
+	F.Label(UI.ConfigPage, "Save, load, and manage config files on your local PC (executor workspace).", UDim2.fromOffset(520, 18), UDim2.fromOffset(0, 28), 9, T.Muted)
 
-	local Card = Instance.new("Frame")
-	Card.Position = UDim2.fromOffset(0, 62)
-	Card.Size = UDim2.new(1, 0, 1, -63)
-	Card.BackgroundColor3 = T.Card
-	Card.BorderSizePixel = 0
-	Card.Parent = UI.ConfigPage
-	F.Round(Card, 9)
-	F.Stroke(Card)
+	local SaveCard = F.Card(UI.ConfigPage, 80)
+	SaveCard.Position = UDim2.fromOffset(0, 62)
 
-	UI.ConfigBox = Instance.new("TextBox")
-	UI.ConfigBox.Position = UDim2.fromOffset(12, 14)
-	UI.ConfigBox.Size = UDim2.new(1, -24, 1, -78)
-	UI.ConfigBox.BackgroundColor3 = T.BG
-	UI.ConfigBox.BorderSizePixel = 0
-	UI.ConfigBox.Text = ""
-	UI.ConfigBox.PlaceholderText = "Export JSON here or paste a config to import."
-	UI.ConfigBox.PlaceholderColor3 = T.Muted
-	UI.ConfigBox.TextColor3 = T.Text
-	UI.ConfigBox.TextSize = 10
-	UI.ConfigBox.Font = Enum.Font.Code
-	UI.ConfigBox.TextXAlignment = Enum.TextXAlignment.Left
-	UI.ConfigBox.TextYAlignment = Enum.TextYAlignment.Top
-	UI.ConfigBox.TextWrapped = true
-	UI.ConfigBox.MultiLine = true
-	UI.ConfigBox.ClearTextOnFocus = false
-	UI.ConfigBox.Parent = Card
-	F.Round(UI.ConfigBox, 7)
-	F.Stroke(UI.ConfigBox)
+	F.Label(SaveCard, "SAVE CURRENT CONFIG", UDim2.fromOffset(180, 18), UDim2.fromOffset(14, 10), 9, T.Muted)
 
-	local Export = F.Button(Card, "EXPORT", UDim2.fromOffset(120, 34), UDim2.new(0, 12, 1, -48))
-	Export.TextColor3 = T.RedBright
-	local Import = F.Button(Card, "IMPORT", UDim2.fromOffset(120, 34), UDim2.new(0, 142, 1, -48))
-	local Clear = F.Button(Card, "CLEAR", UDim2.fromOffset(90, 34), UDim2.new(0, 272, 1, -48))
+	UI.ConfigNameBox = Instance.new("TextBox")
+	UI.ConfigNameBox.Position = UDim2.fromOffset(14, 32)
+	UI.ConfigNameBox.Size = UDim2.new(1, -150, 0, 32)
+	UI.ConfigNameBox.BackgroundColor3 = T.BG
+	UI.ConfigNameBox.BorderSizePixel = 0
+	UI.ConfigNameBox.PlaceholderText = "Enter config name (e.g. main_legit)"
+	UI.ConfigNameBox.PlaceholderColor3 = T.Muted
+	UI.ConfigNameBox.TextColor3 = T.Text
+	UI.ConfigNameBox.TextSize = 11
+	UI.ConfigNameBox.Font = Enum.Font.GothamSemibold
+	UI.ConfigNameBox.ClearTextOnFocus = false
+	UI.ConfigNameBox.Parent = SaveCard
+	F.Round(UI.ConfigNameBox, 7)
+	F.Stroke(UI.ConfigNameBox)
 
-	UI.ConfigState = F.Label(Card, "Ready", UDim2.fromOffset(150, 34), UDim2.new(1, -165, 1, -48), 9, T.Muted)
-	UI.ConfigState.TextXAlignment = Enum.TextXAlignment.Right
+	local SaveBtn = F.Button(SaveCard, "SAVE TO PC", UDim2.fromOffset(120, 32), UDim2.new(1, -125, 0, 32))
+	SaveBtn.TextColor3 = T.RedBright
 
-	Export.MouseButton1Click:Connect(function()
-		UI.ConfigBox.Text = F.ExportConfig()
-		UI.ConfigState.Text = "Exported"
-		UI.ConfigState.TextColor3 = T.Green
-		F.Log("Config exported")
+	UI.ConfigStatus = F.Label(UI.ConfigPage, "Ready", UDim2.fromOffset(200, 20), UDim2.new(1, -200, 0, 40), 9, T.Muted)
+	UI.ConfigStatus.TextXAlignment = Enum.TextXAlignment.Right
+
+	UI.ConfigListScroll = F.Scroll(UI.ConfigPage)
+	UI.ConfigListScroll.Position = UDim2.fromOffset(0, 155)
+	UI.ConfigListScroll.Size = UDim2.new(1, 0, 1, -155)
+	
+	F.Label(UI.ConfigPage, "LOCAL SAVED CONFIGS", UDim2.fromOffset(180, 18), UDim2.fromOffset(14, 142), 9, T.Muted)
+
+	SaveBtn.MouseButton1Click:Connect(function()
+		local success, msg = F.SaveConfigToFile(UI.ConfigNameBox.Text)
+		UI.ConfigStatus.Text = msg
+		UI.ConfigStatus.TextColor3 = success and T.Green or T.RedBright
+		if success then F.RefreshConfigList() end
 	end)
 
-	Import.MouseButton1Click:Connect(function()
-		local Success, Message = F.ImportConfig(UI.ConfigBox.Text)
-		UI.ConfigState.Text = Message
-		UI.ConfigState.TextColor3 = Success and T.Green or T.RedBright
-		if Success then
-			for _, Refresh in ipairs(UI.SettingRefreshers or {}) do Refresh() end
-			F.Log("Config imported")
-		end
-	end)
-
-	Clear.MouseButton1Click:Connect(function()
-		UI.ConfigBox.Text = ""
-		UI.ConfigState.Text = "Cleared"
-		UI.ConfigState.TextColor3 = T.Muted
-	end)
+	F.RefreshConfigList()
 end
 
 function F.BuildUI()
@@ -2906,7 +2998,7 @@ function F.Refresh()
 	local Tool = F.EquippedTool()
 	UI.ToolStatus.Text = "CURRENT TOOL\n" .. (Tool and Tool.Name or "none") .. "\n" .. (F.FirstPerson() and "first person" or "third person")
 
-	UI.SequenceStatus.Text = (C.RangeAuto and "AUTO DB + TAC 1–<50  •  MANUAL EQUIP REV 50–245" or C.DualFireKey.Name .. " / DB + TAC once  •  TRIGGER / equipped tool") .. "\n" .. C.PanicKey.Name .. " stop  •  " .. C.MenuKey.Name .. " menu"
+	UI.SequenceStatus.Text = (C.RangeAuto and "AUTO DB + TAC 1–<50  •  MANUAL EQUIP REV 50–245" or C.DualFireKey.Name .. " / DB + TAC once  •  TRIGGER / equipped tool") .. "\n" .. C.MenuKey.Name .. " close menu"
 
 	if UI.WelcomePingValue then
 		local ping = 0
@@ -3022,7 +3114,7 @@ function F.ConnectWindow()
 			UI.Close.Position = UDim2.new(1, -37, 0, 17)
 		end
 	end)
-	UI.Close.MouseButton1Click:Connect(F.Panic)
+	UI.Close.MouseButton1Click:Connect(F.ToggleMenu)
 end
 
 function F.BindBackpack(Backpack)
@@ -3096,7 +3188,6 @@ function F.HandleInput(Input, Processed)
 	
 	if Key == C.StreamerKey then F.ToggleStreamerMode(); return end
 	if Key == C.MenuKey then F.ToggleMenu(); return end
-	if Key == C.PanicKey then F.Panic(); return end
 
 	if S.UIS:GetFocusedTextBox() then return end
 	if S.GuiService.MenuIsOpen then return end
@@ -3197,9 +3288,13 @@ function F.StartRuntime()
 			St.LastFpsTime = now
 		end
 
-		if UI.ChosenGradient then
-			UI.ChosenGradient.Offset = Vector2.new((os.clock() * 0.7) % 2 - 1, 0)
+		for _, Gradient in ipairs(St.AnimatedGradients) do
+			if Gradient and Gradient.Parent then
+				Gradient.Offset = Vector2.new((os.clock() * 0.7) % 2 - 1, 0)
+			end
 		end
+		
+		F.UpdateHitboxes()
 
 		local Character = S.Player.Character
 		local Humanoid = F.Humanoid(Character)
@@ -3253,10 +3348,6 @@ function F.StartRuntime()
 end
 
 local Success, Error = xpcall(function()
-	St.Runtime = Instance.new("BindableFunction")
-	St.Runtime.Name = "for the chosenGuiRuntime"
-	St.Runtime.OnInvoke = function() F.Cleanup(); return true end
-	St.Runtime.Parent = S.PlayerGui
 	F.BuildUI()
 	F.ConnectSequenceUI()
 	F.ConnectWindow()
@@ -3268,15 +3359,10 @@ local Success, Error = xpcall(function()
 	end
 	F.RefreshTargetsPage()
 	F.Refresh()
-	F.Log("for the chosen loaded / client controls ready")
+	F.Log("for the chosen loaded / local FS ready")
 end, debug.traceback)
 
 if not Success then
 	F.Cleanup()
 	warn("[for the chosen] Startup error:\n" .. tostring(Error))
 end
-]====], "for the chosensGUI")
-if not Run then
-    error("for the chosen failed to compile: " .. tostring(CompileError), 0)
-end
-return Run()
