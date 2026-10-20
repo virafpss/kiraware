@@ -1,6 +1,6 @@
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 46+ / LOCAL FS CONFIGS
+-- CLIENT PAYLOAD / REVISION 47+ / POST-COMBO FINISHER
 --========================================================
 
 local C = {}
@@ -890,12 +890,36 @@ function F.EndDualFire(Message)
 	local Session = St.DualFire
 	if not Session then return end
 	St.DualFire = nil
+	
 	if Session.Activated then
 		for _, Tool in ipairs(Session.Tools) do
 			if not Session.Released[Tool] then F.RequestToolRelease(Tool) end
 		end
+
+		-- COMBO FINISHER SWAP LOGIC: Equip whichever shotgun still has ammo
+		local DB = Session.Tools[1]
+		local Tac = Session.Tools[2]
+		local FinisherTool = nil
+		
+		if F.ToolReady(Tac, true) then
+			FinisherTool = Tac
+		elseif F.ToolReady(DB, true) then
+			FinisherTool = DB
+		end
+		
+		if FinisherTool then
+			for _, Entry in ipairs(Session.Restore) do
+				if Entry.Tool == FinisherTool then
+					Entry.Parent = Session.Character
+				else
+					Entry.Parent = Session.Backpack
+				end
+			end
+		end
 	end
+	
 	F.RestoreEquipment(Session)
+	
 	if Message and not St.Cleaned then
 		if Session.Automatic then
 			St.RangeRetryAt = os.clock() + 0.5
@@ -3359,7 +3383,7 @@ local Success, Error = xpcall(function()
 	end
 	F.RefreshTargetsPage()
 	F.Refresh()
-	F.Log("for the chosen loaded / local FS ready")
+	F.Log("for the chosen loaded / finisher script active")
 end, debug.traceback)
 
 if not Success then
