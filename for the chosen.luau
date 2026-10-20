@@ -10,7 +10,7 @@ end
 local Run, CompileError = Compile([====[
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 33 / SAFE COMPILATION WRAPPER
+-- CLIENT PAYLOAD / REVISION 39 / TRIGGER TOGGLE & ESP FIX
 -- The enclosing loader embeds this entire payload. Run the complete file
 -- in a client Luau environment that provides loadstring and Roblox APIs.
 -- All panel logic, camera controls, overlays and movement run on the client.
@@ -33,12 +33,13 @@ local Run, CompileError = Compile([====[
 -- A selected, visible target's body center must be inside it to trigger.
 -- The cursor ray must hit that same selected player before any automatic shot.
 -- The square controls activation; Q/J still control camera aim separately.
--- T toggles firing. Settings can disable the square or automatic DB + TAC.
+-- Universal trigger can be toggled via settings.
 -- Y still requests a manual pair; normal trigger behavior resumes afterward.
 -- Both guns stay equipped until their activation has been released; the
 -- previous equipment is restored afterward. Panic cancels the queued pair.
 -- Panic stays stopped until you explicitly enable a control again.
 -- Config export/import transfers JSON manually; it is not automatic saving.
+-- Target lists can be exported and merged via import.
 --
 -- NAME ESP: SELECTED TARGETS RED / CREWMATES GREEN / OTHERS HIDDEN
 -- TEXTURED UI
@@ -105,7 +106,6 @@ end
 
 C.CameraLockKey = Enum.KeyCode.Q
 C.SequentialKey = Enum.KeyCode.T
-C.UniversalKey = Enum.KeyCode.T
 C.DualFireKey = Enum.KeyCode.Y
 
 C.DualFireDBName = "[Double-Barrel SG]"
@@ -443,9 +443,7 @@ function F.PauseInput()
 	F.EndDualFire()
 	F.ReleaseTool()
 	if St.HeldCameraKey then F.DisableCameraLock() end
-	if St.HeldUniversalKey then F.DisableUniversal(false) end
 	St.HeldCameraKey = nil
-	St.HeldUniversalKey = nil
 end
 
 function F.Panic()
@@ -503,7 +501,7 @@ function F.SetKey(Name, Key)
 		F.Log("Choose a keyboard key other than Escape")
 		return false
 	end
-	for _, Other in ipairs({"CameraLockKey", "UniversalKey", "MenuKey", "StreamerKey",
+	for _, Other in ipairs({"CameraLockKey", "MenuKey", "StreamerKey",
 		"PanicKey", "SpeedKey", "AimAssistKey", "DualFireKey"}) do
 		if Other ~= Name and C[Other] == Key then
 			F.Log(Key.Name .. " is already bound to " .. Other)
@@ -747,6 +745,37 @@ function F.SelectAllTargets()
 	F.ApplyNameESPVisibility()
 	if F.RefreshTargetsPage then F.RefreshTargetsPage() end
 	if F.Refresh then F.Refresh() end
+end
+
+function F.ExportTargetsJson()
+	local list = {}
+	for uid, sel in pairs(St.SelectedTargets) do
+		if sel == true then table.insert(list, tostring(uid)) end
+	end
+	local success, encoded = pcall(S.HttpService.JSONEncode, S.HttpService, {targets = list})
+	if success then return encoded end
+	return "{}"
+end
+
+function F.ImportTargetsJson(text)
+	if typeof(text) ~= "string" or #text > 65536 then return false, "Invalid text data" end
+	local success, decoded = pcall(S.HttpService.JSONDecode, S.HttpService, text)
+	if not success or typeof(decoded) ~= "table" then return false, "Invalid JSON format" end
+	local rawList = decoded.targets or decoded
+	if typeof(rawList) ~= "table" then return false, "Missing target list array" end
+	
+	local added = 0
+	for _, rawId in ipairs(rawList) do
+		local uid = tonumber(rawId)
+		if uid and uid > 0 and not St.SelectedTargets[uid] then
+			St.SelectedTargets[uid] = true
+			added += 1
+		end
+	end
+	F.ApplyNameESPVisibility()
+	if F.RefreshTargetsPage then F.RefreshTargetsPage() end
+	if F.Refresh then F.Refresh() end
+	return true, "Merged " .. tostring(added) .. " new targets successfully!"
 end
 
 function F.IsKnifeTool(Tool)
@@ -1630,16 +1659,26 @@ end
 
 function F.DisableUniversal(_Holster, _Force)
 	St.Universal = false
-	St.HeldUniversalKey = nil
 	F.StopTriggerTarget()
 	return true
 end
 
 function F.EnableUniversal()
-	F.DisableSequential(false)
+	F.DisableSequential(false) -- This was accidentally typed as St.DisableSequential
 	St.Panicked = false
 	St.Universal = true
+	St.RangeRetryAt = 0
+	St.RangeLastNotice = nil
 	return true
+end
+
+function F.SetUniversal(Enabled)
+	if Enabled then
+		F.EnableUniversal()
+	else
+		F.DisableUniversal(false, true)
+	end
+	F.Refresh()
 end
 
 function F.SequentialMain()
@@ -1846,9 +1885,14 @@ function F.StartNameESP()
 	local LastReconcile = 0
 	St.NameESPHeartbeatConnection = F.Connect(S.RunService.Heartbeat, function()
 		local Now = os.clock()
+		for _, Player in ipairs(S.Players:GetPlayers()) do
+			F.BindNameESPPlayer(Player)
+		end
 		if Now - LastReconcile < 1 then return end
 		LastReconcile = Now
-		for _, Player in ipairs(S.Players:GetPlayers()) do F.BindNameESPPlayer(Player) end
+		for _, Player in ipairs(S.Players:GetPlayers()) do
+			F.UpdateNameESPTag(Player)
+		end
 	end)
 end
 
@@ -1889,7 +1933,7 @@ function F.ExportConfig()
 	end
 	for Slot, Name in pairs(St.LearnedSlots) do Learned[tostring(Slot)] = Name end
 	return S.HttpService:JSONEncode({
-		version = 33,
+		version = 39,
 		dualFire = {
 			db = C.DualFireDBName, tac = C.DualFireTacName,
 			repeatDelayMs = C.DualFireCooldown * 1000,
@@ -1907,7 +1951,6 @@ function F.ExportConfig()
 			dualFire = C.DualFireKey.Name,
 			cameralock = C.CameraLockKey.Name,
 			sequential = C.SequentialKey.Name,
-			universal = C.UniversalKey.Name,
 			menu = C.MenuKey.Name,
 			streamer = C.StreamerKey.Name,
 			panic = C.PanicKey.Name,
@@ -1916,8 +1959,7 @@ function F.ExportConfig()
 		},
 		hold = {
 			cameralock = C.HoldCameraLock,
-			sequential = C.HoldSequential,
-			universal = C.HoldUniversal
+			sequential = C.HoldSequential
 		},
 		timing = {
 			shotCooldown = C.ShotCooldown - 1000,
@@ -1954,12 +1996,10 @@ function F.ImportConfig(Text)
 		if typeof(Value) == "boolean" then return Value end
 		return Default
 	end
-	local KeyFields = {cameralock = "CameraLockKey", universal = "UniversalKey", menu = "MenuKey", streamer = "StreamerKey", panic = "PanicKey", speed = "SpeedKey", aimAssist = "AimAssistKey", dualFire = "DualFireKey"}
+	local KeyFields = {cameralock = "CameraLockKey", menu = "MenuKey", streamer = "StreamerKey", panic = "PanicKey", speed = "SpeedKey", aimAssist = "AimAssistKey", dualFire = "DualFireKey"}
 	local Keys, NewKeys, Used = Section("keys"), {}, {}
-	local LegacyY = Keys.dualFire == nil and Keys.universal == "Y"
 	for JsonKey, ConfigKey in pairs(KeyFields) do
 		local Value = Keys[JsonKey]
-		if JsonKey == "universal" and LegacyY then Value = "T" end
 		if JsonKey == "cameralock" and Value == nil then Value = Keys.camlock end
 		local Key = C[ConfigKey]
 		if Value ~= nil then Key = typeof(Value) == "string" and C.KeyByName[Value] or nil end
@@ -1998,7 +2038,6 @@ function F.ImportConfig(Text)
 	local CameraHold = Hold.cameralock
 	if CameraHold == nil then CameraHold = Hold.camlock end
 	C.HoldCameraLock = Boolean(CameraHold, C.HoldCameraLock)
-	C.HoldUniversal = Boolean(Hold.universal, C.HoldUniversal)
 	F.DisableCameraLock()
 	local Timing = Section("timing")
 	C.ShotCooldown = Number(Timing.shotCooldown, 1, 1000, C.ShotCooldown * 1000) / 1000
@@ -2041,7 +2080,7 @@ function F.ImportConfig(Text)
 	F.SetAimAssist(Boolean(Aim.enabled, St.AimAssist))
 	F.SetSpeed(Boolean(Movement.speedEnabled, St.Speed))
 	local TriggerEnabled = Boolean(Section("trigger").enabled, St.Universal)
-	if TriggerEnabled and not C.HoldUniversal then F.EnableUniversal() else F.DisableUniversal(false) end
+	F.SetUniversal(TriggerEnabled)
 	F.RefreshTargetsPage()
 	F.Refresh()
 	return true, "Config imported"
@@ -2353,14 +2392,13 @@ function F.BuildSequencePage()
 		TitleLabel.Font = Enum.Font.GothamBold
 		local DescriptionLabel = F.Label(Frame, Description, UDim2.new(1, -245, 0, 42), UDim2.fromOffset(16, 40), 9, T.Muted)
 		DescriptionLabel.TextWrapped = true
-		local State = F.Button(Frame, "OFF", UDim2.fromOffset(74, 26), UDim2.new(1, -226, 0, 34))
-		local Key = F.Button(Frame, "", UDim2.fromOffset(128, 34), UDim2.new(1, -143, 0, 30))
-		return {State = State, Key = Key}
+		local State = F.Button(Frame, "OFF", UDim2.fromOffset(74, 26), UDim2.new(1, -90, 0, 34))
+		return {State = State}
 	end
 
 	Section("TRIGGER MODES")
 	UI.SequentialMode = TriggerCard("Sequential trigger", "Automatically equips and fires one configured weapon. Multi-gun switching is disabled.")
-	UI.UniversalMode = TriggerCard("Universal trigger", "T toggles fire. Auto DB + TAC below 50; manually equip REV for 50–245.")
+	UI.UniversalMode = TriggerCard("Universal trigger", "Enables automatic triggering. Auto DB + TAC below 50; manually equip REV for 50–245.")
 	UI.SequentialMode.State.Parent.Visible = false
 
 	local UniversalCard = F.Card(UI.SequenceScroll, 72)
@@ -2433,19 +2471,58 @@ function F.BuildTargetsPage()
 	Header.BackgroundTransparency = 1
 	Header.Parent = UI.TargetsScroll
 
-	local HeaderText = F.Label(Header, "Target selection", UDim2.fromOffset(300, 24), UDim2.fromOffset(0, 0), 18)
+	local HeaderText = F.Label(Header, "Target selection & share", UDim2.fromOffset(350, 24), UDim2.fromOffset(0, 0), 18)
 	HeaderText.Font = Enum.Font.GothamBold
-	F.Label(Header, "Selected targets are remembered by UserId. CameraLock picks the best selected target once, then stays locked until that target becomes invalid.", UDim2.new(1, 0, 0, 18), UDim2.fromOffset(0, 30), 9, T.Muted)
+	F.Label(Header, "Export your target list code or paste a friend's target list below to merge missing targets.", UDim2.new(1, 0, 0, 18), UDim2.fromOffset(0, 30), 9, T.Muted)
+
+	-- Share Card Container
+	local ShareCard = F.Card(UI.TargetsScroll, 110)
+	ShareCard.LayoutOrder = 2
+	F.Label(ShareCard, "TARGET LIST SHARING", UDim2.fromOffset(180, 18), UDim2.fromOffset(14, 10), 9, T.Muted)
+
+	UI.TargetShareBox = Instance.new("TextBox")
+	UI.TargetShareBox.Position = UDim2.fromOffset(14, 32)
+	UI.TargetShareBox.Size = UDim2.new(1, -28, 0, 32)
+	UI.TargetShareBox.BackgroundColor3 = T.BG
+	UI.TargetShareBox.BorderSizePixel = 0
+	UI.TargetShareBox.PlaceholderText = "Export or paste target JSON code here..."
+	UI.TargetShareBox.PlaceholderColor3 = T.Muted
+	UI.TargetShareBox.TextColor3 = T.Text
+	UI.TargetShareBox.TextSize = 10
+	UI.TargetShareBox.Font = Enum.Font.Code
+	UI.TargetShareBox.ClearTextOnFocus = false
+	UI.TargetShareBox.Parent = ShareCard
+	F.Round(UI.TargetShareBox, 7)
+	F.Stroke(UI.TargetShareBox)
+
+	local ExportTargetsBtn = F.Button(ShareCard, "EXPORT", UDim2.fromOffset(110, 28), UDim2.fromOffset(14, 72))
+	ExportTargetsBtn.TextColor3 = T.RedBright
+	local ImportTargetsBtn = F.Button(ShareCard, "IMPORT (MERGE)", UDim2.fromOffset(130, 28), UDim2.fromOffset(130, 72))
+
+	UI.TargetShareStatus = F.Label(ShareCard, "Ready", UDim2.fromOffset(200, 28), UDim2.new(1, -215, 0, 72), 9, T.Muted)
+	UI.TargetShareStatus.TextXAlignment = Enum.TextXAlignment.Right
+
+	ExportTargetsBtn.MouseButton1Click:Connect(function()
+		UI.TargetShareBox.Text = F.ExportTargetsJson()
+		UI.TargetShareStatus.Text = "Exported to box"
+		UI.TargetShareStatus.TextColor3 = T.Green
+	end)
+
+	ImportTargetsBtn.MouseButton1Click:Connect(function()
+		local ok, msg = F.ImportTargetsJson(UI.TargetShareBox.Text)
+		UI.TargetShareStatus.Text = msg
+		UI.TargetShareStatus.TextColor3 = ok and T.Green or T.RedBright
+	end)
 
 	local Controls = F.Card(UI.TargetsScroll, 60)
 	Controls.Name = "TargetControls"
-	Controls.LayoutOrder = 2
+	Controls.LayoutOrder = 3
 
 	UI.TargetSelectionStatus = F.Label(Controls, "SELECTED / 0", UDim2.fromOffset(150, 22), UDim2.fromOffset(14, 19), 10, T.Muted)
 	UI.TargetSelectionStatus.Font = Enum.Font.GothamBold
 
-	local SelectAll = F.Button(Controls, "SELECT ALL", UDim2.fromOffset(112, 32), UDim2.new(1, -238, 0, 14))
-	local Clear = F.Button(Controls, "CLEAR", UDim2.fromOffset(102, 32), UDim2.new(1, -116, 0, 14))
+	local SelectAll = F.Button(Controls, "ALL", UDim2.fromOffset(72, 32), UDim2.new(1, -170, 0, 14))
+	local Clear = F.Button(Controls, "CLEAR", UDim2.fromOffset(72, 32), UDim2.new(1, -90, 0, 14))
 
 	SelectAll.MouseButton1Click:Connect(function() F.SelectAllTargets() end)
 	Clear.MouseButton1Click:Connect(function() F.ClearSelectedTargets() end)
@@ -2593,7 +2670,6 @@ function F.BuildSettingsPage()
 
 	Section("INPUT BEHAVIOR")
 	ToggleSetting("Hold CameraLock", "CameraLock stays active only while its key is held.", function() return C.HoldCameraLock end, function(Value) C.HoldCameraLock = Value; F.DisableCameraLock() end)
-	ToggleSetting("Hold universal", "Universal trigger stays active only while held.", function() return C.HoldUniversal end, function(Value) C.HoldUniversal = Value; F.DisableUniversal(false) end)
 
 	Section("AIM ASSIST")
 	ToggleSetting("Aim assist", "Moves your camera toward a visible selected target inside the FOV.", function() return St.AimAssist end, function(Value) F.SetAimAssist(Value) end)
@@ -2611,10 +2687,10 @@ function F.BuildSettingsPage()
 	ToggleSetting("Player names", "Selected targets are red; other crewmates are green. Everyone else is hidden.", function() return St.NameESPEnabled end, function(Value) St.NameESPEnabled = Value; F.ApplyNameESPVisibility() end)
 
 	Section("TRIGGERBOT")
+	ToggleSetting("Trigger enabled", "Globally turns the triggerbot system on or off without a shortcut key.", function() return St.Universal end, function(Value) F.SetUniversal(Value) end)
 	ToggleSetting("Trigger FOV", "Enable trigger detection within the configured cursor area.", function() return C.TriggerFOVEnabled end, function(Value) F.SetTriggerFOV(Value) end)
 	NumberSetting("Trigger FOV size", "Detection area width and height in pixels. Both sides change together.", function() return C.TriggerFOVSize end, function(Value) F.SetTriggerFOVSize(Value) end, 20, 1200, " px")
 	ToggleSetting("Auto DB + TAC", "Empty DB uses TAC. Equip REV: 50–245, or 0–245 if either shotgun is empty.", function() return C.RangeAuto end, function(Value) F.SetRangeAuto(Value) end)
-	KeySetting("Trigger key", "Binds the toggle key for the trigger system (Universal).", function() return C.UniversalKey end, function(Key) F.SetKey("UniversalKey", Key) end)
 	ToggleSetting("Knife check", "Prevents automatic trigger activation while the selected/equipped tool is a knife.", function() return C.TriggerKnifeCheck end, function(Value) C.TriggerKnifeCheck = Value end)
 
 	Section("TIMING")
@@ -2711,18 +2787,6 @@ end
 
 function F.RefreshSequence()
 	if St.Cleaned or not St.Ready or not UI.SequenceRows then return end
-	if not (St.KeyCapture and St.KeyCapture.Button == UI.SequentialMode.Key) then
-		UI.SequentialMode.Key.Text = C.SequentialKey.Name
-		UI.SequentialMode.Key.TextColor3 = T.Text
-	end
-	if not (St.KeyCapture and St.KeyCapture.Button == UI.UniversalMode.Key) then
-		UI.UniversalMode.Key.Text = C.UniversalKey.Name
-		UI.UniversalMode.Key.TextColor3 = T.Text
-	end
-	UI.SequentialMode.State.Text = St.Sequential and "ACTIVE" or "OFF"
-	UI.SequentialMode.State.TextColor3 = St.Sequential and T.RedBright or T.Muted
-	UI.SequentialMode.State.BackgroundColor3 = St.Sequential and T.RedDark or T.Panel2
-
 	UI.UniversalMode.State.Text = St.Universal and "ACTIVE" or "OFF"
 	UI.UniversalMode.State.TextColor3 = St.Universal and T.RedBright or T.Muted
 	UI.UniversalMode.State.BackgroundColor3 = St.Universal and T.RedDark or T.Panel2
@@ -2760,22 +2824,15 @@ function F.Refresh()
 	local Tool = F.EquippedTool()
 	UI.ToolStatus.Text = "CURRENT TOOL\n" .. (Tool and Tool.Name or "none") .. "\n" .. (F.FirstPerson() and "first person" or "third person")
 
-	UI.SequenceStatus.Text = (C.RangeAuto and "AUTO DB + TAC 1–<50  •  MANUAL EQUIP REV 50–245" or C.DualFireKey.Name .. " / DB + TAC once  •  TRIGGER / equipped tool") .. "\n" .. C.UniversalKey.Name .. " toggle/hold  •  " .. C.PanicKey.Name .. " stop  •  " .. C.MenuKey.Name .. " menu"
+	UI.SequenceStatus.Text = (C.RangeAuto and "AUTO DB + TAC 1–<50  •  MANUAL EQUIP REV 50–245" or C.DualFireKey.Name .. " / DB + TAC once  •  TRIGGER / equipped tool") .. "\n" .. C.PanicKey.Name .. " stop  •  " .. C.MenuKey.Name .. " menu"
 	for _, Refresh in ipairs(UI.SettingRefreshers or {}) do Refresh() end
 	F.RefreshSequence()
 end
 
 function F.ConnectSequenceUI()
 	UI.UniversalMode.State.MouseButton1Click:Connect(function()
-		if St.Universal then F.DisableUniversal(false) else
-			if C.HoldUniversal then F.Log("Hold " .. C.UniversalKey.Name .. " to enable the trigger")
-			else F.EnableUniversal() end
-		end
+		F.SetUniversal(not St.Universal)
 		F.Refresh()
-	end)
-	UI.UniversalMode.Key.MouseButton1Click:Connect(function()
-		St.KeyCapture = {Button = UI.UniversalMode.Key, Set = function(Key) F.SetKey("UniversalKey", Key) end}
-		UI.UniversalMode.Key.Text = "PRESS KEY"
 	end)
 end
 
@@ -2926,11 +2983,6 @@ function F.HandleInput(Input, Processed)
 		if Processed or St.HeldDualKey then return end
 		St.HeldDualKey = Key
 		F.BeginDualFire()
-	elseif Key == C.UniversalKey then
-		if St.Universal and not C.HoldUniversal then F.DisableUniversal(false) else
-			F.EnableUniversal()
-			if C.HoldUniversal then St.HeldUniversalKey = Key end
-		end
 	elseif Processed then
 		return
 	elseif Key == C.AimAssistKey then
@@ -2961,7 +3013,6 @@ function F.StartRuntime()
 		end
 		if Input.KeyCode == St.HeldDualKey then St.HeldDualKey = nil end
 		if Input.KeyCode == St.HeldCameraKey then St.HeldCameraKey = nil; F.DisableCameraLock() end
-		if Input.KeyCode == St.HeldUniversalKey then St.HeldUniversalKey = nil; F.DisableUniversal(false) end
 		F.Refresh()
 	end)
 	F.Connect(S.RunService.Heartbeat, function()
