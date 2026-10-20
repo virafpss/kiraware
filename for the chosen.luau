@@ -1,6 +1,6 @@
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 47+ / POST-COMBO FINISHER
+-- CLIENT PAYLOAD / REVISION 48+ / BIDIRECTIONAL FALLBACK
 --========================================================
 
 local C = {}
@@ -227,7 +227,7 @@ St.TriggerRayParams = RaycastParams.new()
 St.TriggerRayParams.FilterType = Enum.RaycastFilterType.Exclude
 St.TriggerRayParams.IgnoreWater = true
 St.DualFire = nil
-St.TacFallback = nil
+St.SingleShotgunFallback = nil
 St.ManualRevTool = nil
 St.TriggerFOVTarget = nil
 St.RangeLastNotice = nil
@@ -932,7 +932,7 @@ function F.BeginDualFire(Automatic)
 	if not F.CanInteract(not Automatic) then return false end
 	if Automatic then
 		if F.RangeTarget() ~= "Dual" then return false end
-	elseif St.TacFallback or (St.DualFire and St.DualFire.Automatic) then
+	elseif St.SingleShotgunFallback or (St.DualFire and St.DualFire.Automatic) then
 		F.EndRangeFire()
 	end
 	if Automatic and St.DualFire then return false end
@@ -1013,7 +1013,7 @@ function F.UpdateDualFire()
 		local Mode, Target = F.RangeTarget()
 		ShotTarget = Target
 		if Mode ~= "Dual" or not Target then
-			if Mode == "Tac" then F.BeginTacFallback()
+			if Mode == "Tac" or Mode == "DB" then F.BeginSingleShotgunFallback(Mode)
 			else F.EndRangeFire(); St.UniTarget, St.LastUniTarget = nil, nil end
 			return
 		end
@@ -1576,16 +1576,24 @@ function F.RangeTarget()
 	if Distance < C.RangeSwitch then
 		local DB = F.DualTool(C.DualFireDBName, {"DB", "Double Barrel", "Double Barrel SG", "Double Barrel Shotgun"})
 		local Tac = F.DualTool(C.DualFireTacName, {"Tac", "Tactical", "Tactical SG", "Tactical Shotgun"})
-		if (F.ToolEmpty(DB) or F.ToolEmpty(Tac)) and F.IsRangeRevolver(F.EquippedTool()) then return "Rev", Target end
+		
+		local dbReady = F.ToolReady(DB, true)
+		local tacReady = F.ToolReady(Tac, true)
+		
+		if not dbReady and not tacReady and F.IsRangeRevolver(F.EquippedTool()) then return "Rev", Target end
 		if Distance < C.RangeMinimum then return nil end
-		return F.ToolEmpty(DB) and "Tac" or "Dual", Target
+		
+		if not dbReady and tacReady then return "Tac", Target end
+		if not tacReady and dbReady then return "DB", Target end
+		
+		return "Dual", Target
 	end
 	return "Rev", Target
 end
 
 function F.EndRangeFire()
 	if St.DualFire and St.DualFire.Automatic then F.EndDualFire() end
-	F.EndTacFallback()
+	F.EndSingleShotgunFallback()
 end
 
 function F.SetRangeAuto(Enabled)
@@ -1602,58 +1610,60 @@ function F.IsRangeRevolver(Tool)
 	return Name == Configured or Name == "rev" or Name == "revolver"
 end
 
-function F.EndTacFallback()
-	local Session = St.TacFallback
+function F.EndSingleShotgunFallback()
+	local Session = St.SingleShotgunFallback
 	if not Session then return end
-	St.TacFallback = nil
+	St.SingleShotgunFallback = nil
 	F.ReleaseTool()
 	F.RequestToolRelease(Session.Tool)
 	F.RestoreEquipment(Session)
 end
 
-function F.BeginTacFallback()
-	if St.TacFallback then return true end
-	if F.RangeTarget() ~= "Tac" then return false end
+function F.BeginSingleShotgunFallback(Mode)
+	if St.SingleShotgunFallback and St.SingleShotgunFallback.Mode == Mode then return true end
+	
 	local Character = S.Player.Character
 	local Backpack = S.Player:FindFirstChildOfClass("Backpack")
-	local Tac = F.DualTool(C.DualFireTacName, {"Tac", "Tactical", "Tactical SG", "Tactical Shotgun"})
-	if not Backpack or not F.ToolReady(Tac, true) then
+	local Gun = Mode == "Tac" and F.DualTool(C.DualFireTacName, {"Tac", "Tactical", "Tactical SG", "Tactical Shotgun"}) or F.DualTool(C.DualFireDBName, {"DB", "Double Barrel", "Double Barrel SG", "Double Barrel Shotgun"})
+	
+	if not Backpack or not F.ToolReady(Gun, true) then
 		F.EndRangeFire()
-		F.RangeNotice("DB is empty / TAC needs ammo to continue")
+		F.RangeNotice("Shotgun fallback needs ammo to continue")
 		return false
 	end
 	local Pair = St.DualFire
 	if Pair and not Pair.Automatic then return false end
 	F.ReleaseTool()
 	local Session = {
-		Character = Character, Backpack = Backpack, Tool = Tac,
-		Restore = {}, ReadyAfter = os.clock() + (Tac.Parent == Character and 0 or C.DualFireEquipDelay),
+		Mode = Mode,
+		Character = Character, Backpack = Backpack, Tool = Gun,
+		Restore = {}, ReadyAfter = os.clock() + (Gun.Parent == Character and 0 or C.DualFireEquipDelay),
 	}
 	if Pair then
 		Session.Restore = Pair.Restore
 		St.DualFire = nil
 	else
-		table.insert(Session.Restore, {Tool = Tac, Parent = Tac.Parent, ManualActivationOnly = Tac.ManualActivationOnly})
+		table.insert(Session.Restore, {Tool = Gun, Parent = Gun.Parent, ManualActivationOnly = Gun.ManualActivationOnly})
 		for _, Equipped in ipairs(Character:GetChildren()) do
-			if Equipped:IsA("Tool") and Equipped ~= Tac then table.insert(Session.Restore, {Tool = Equipped, Parent = Character}) end
+			if Equipped:IsA("Tool") and Equipped ~= Gun then table.insert(Session.Restore, {Tool = Equipped, Parent = Character}) end
 		end
 	end
-	St.TacFallback = Session
+	St.SingleShotgunFallback = Session
 	local Success, Error = pcall(function()
 		for _, Tool in ipairs(Character:GetChildren()) do
-			if Tool:IsA("Tool") and Tool ~= Tac then F.RequestToolRelease(Tool); Tool.Parent = Backpack end
+			if Tool:IsA("Tool") and Tool ~= Gun then F.RequestToolRelease(Tool); Tool.Parent = Backpack end
 		end
-		Tac.ManualActivationOnly = true
-		Tac.Parent = Character
-		F.RequestToolRelease(Tac)
+		Gun.ManualActivationOnly = true
+		Gun.Parent = Character
+		F.RequestToolRelease(Gun)
 	end)
-	if not Success or St.TacFallback ~= Session or Tac.Parent ~= Character then
-		if St.TacFallback == Session then F.EndTacFallback() end
+	if not Success or St.SingleShotgunFallback ~= Session or Gun.Parent ~= Character then
+		if St.SingleShotgunFallback == Session then F.EndSingleShotgunFallback() end
 		St.RangeRetryAt = os.clock() + 0.5
-		F.RangeNotice("TAC fallback equip failed" .. (Success and "" or ": " .. tostring(Error)))
+		F.RangeNotice(Mode .. " fallback equip failed" .. (Success and "" or ": " .. tostring(Error)))
 		return false
 	end
-	F.RangeNotice("DB is empty / TAC trigger active until DB has ammo")
+	F.RangeNotice("Fallback trigger active for " .. Mode)
 	return true
 end
 
@@ -1663,29 +1673,29 @@ function F.RangeMain()
 	St.UniTarget, St.LastUniTarget = Target, Target
 	if Mode == "Dual" then
 		St.ManualRevTool = nil
-		F.EndTacFallback()
+		F.EndSingleShotgunFallback()
 		F.ReleaseTool()
 		if not St.DualFire and os.clock() >= St.RangeRetryAt then
 			if F.BeginDualFire(true) then St.RangeLastNotice = nil end
 		end
 		return
 	end
-	if Mode == "Tac" then
+	if Mode == "Tac" or Mode == "DB" then
 		St.ManualRevTool = nil
-		if not St.TacFallback then
-			if os.clock() < St.RangeRetryAt or not F.BeginTacFallback() then return end
+		if not St.SingleShotgunFallback or St.SingleShotgunFallback.Mode ~= Mode then
+			if os.clock() < St.RangeRetryAt or not F.BeginSingleShotgunFallback(Mode) then return end
 		end
-		local Session = St.TacFallback
-		local Tac = Session.Tool
-		if Session.Character ~= S.Player.Character or Tac.Parent ~= Session.Character or not F.ToolReady(Tac, true) then F.EndTacFallback(); return end
+		local Session = St.SingleShotgunFallback
+		local Gun = Session.Tool
+		if Session.Character ~= S.Player.Character or Gun.Parent ~= Session.Character or not F.ToolReady(Gun, true) then F.EndSingleShotgunFallback(); return end
 		local Now = os.clock()
 		local effectiveCooldown = 0
-		if Now >= Session.ReadyAfter and Now - (St.ToolLastShots[Tac] or -math.huge) >= effectiveCooldown and F.FireTool(Tac, Target) then
-			St.LastUniShot, St.ToolLastShots[Tac] = Now, Now
+		if Now >= Session.ReadyAfter and Now - (St.ToolLastShots[Gun] or -math.huge) >= effectiveCooldown and F.FireTool(Gun, Target) then
+			St.LastUniShot, St.ToolLastShots[Gun] = Now, Now
 		end
 		return
 	end
-	F.EndTacFallback()
+	F.EndSingleShotgunFallback()
 	if St.DualFire and St.DualFire.Automatic then F.EndDualFire() end
 	local Tool = F.EquippedTool()
 	if not F.IsRangeRevolver(Tool) or not F.ToolReady(Tool, true) then
@@ -3009,7 +3019,7 @@ function F.Refresh()
 
 	local Mode = "IDLE"
 	if St.Sequential then Mode = "SEQUENTIAL"
-	elseif St.Universal then Mode = St.TacFallback and "TAC FALLBACK" or (C.RangeAuto and "RANGE TRIGGER" or "UNIVERSAL") end
+	elseif St.Universal then Mode = St.SingleShotgunFallback and string.upper(St.SingleShotgunFallback.Mode) .. " FALLBACK" or (C.RangeAuto and "RANGE TRIGGER" or "UNIVERSAL") end
 
 	UI.Mode.Text = "MODE / " .. Mode
 	UI.Mode.TextColor3 = Mode == "IDLE" and T.Muted or T.RedBright
@@ -3383,7 +3393,7 @@ local Success, Error = xpcall(function()
 	end
 	F.RefreshTargetsPage()
 	F.Refresh()
-	F.Log("for the chosen loaded / finisher script active")
+	F.Log("for the chosen loaded / bidirectional fallback active")
 end, debug.traceback)
 
 if not Success then
