@@ -1,6 +1,6 @@
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 48+ / BIDIRECTIONAL FALLBACK
+-- CLIENT PAYLOAD / REVISION 51+ / DB TIMING FIX
 --========================================================
 
 local C = {}
@@ -96,10 +96,6 @@ C.AimAssistKey = Enum.KeyCode.J
 C.AimAssistFOV = 100
 C.ShowAimAssistFOV = true
 
-C.HitboxExpanderEnabled = false
-C.HitboxSize = 5
-C.ShowHitbox = false
-
 C.TargetCursorWeight = 0.70
 C.TargetWorldDistanceWeight = 0.30
 
@@ -175,8 +171,6 @@ St.NameESPEnabled = true
 St.NameESPTags = {}
 St.NameESPConnections = {}
 St.NameESPPending = {}
-St.OriginalHitboxSizes = {}
-St.HitboxBoxes = {}
 
 St.CameraLockTarget = nil
 St.SeqTarget = nil
@@ -435,20 +429,6 @@ function F.Cleanup()
 		Tag:Destroy()
 		St.NameESPTags[Player] = nil
 	end
-	
-	for Player, Orig in pairs(St.OriginalHitboxSizes) do
-		local Character = Player.Character
-		local Root = Character and Character:FindFirstChild("HumanoidRootPart")
-		if Root and Root:IsA("BasePart") then
-			Root.Size = Orig.Size
-		end
-	end
-	table.clear(St.OriginalHitboxSizes)
-	
-	for _, Box in pairs(St.HitboxBoxes) do
-		Box:Destroy()
-	end
-	table.clear(St.HitboxBoxes)
 
 	St.Speed = false
 	St.HeldDualKey = nil
@@ -896,7 +876,6 @@ function F.EndDualFire(Message)
 			if not Session.Released[Tool] then F.RequestToolRelease(Tool) end
 		end
 
-		-- COMBO FINISHER SWAP LOGIC: Equip whichever shotgun still has ammo
 		local DB = Session.Tools[1]
 		local Tac = Session.Tools[2]
 		local FinisherTool = nil
@@ -1031,10 +1010,7 @@ function F.UpdateDualFire()
 		return
 	end
 	if Session.Phase == "Release" then
-		if C.RapidFireEnabled then
-			Session.ReleaseAt = Now
-			Session.RestoreAt = Now
-		end
+		-- Fixed: Removed RapidFire forcing ReleaseAt to Now, which caused blanking
 		if Now < Session.ReleaseAt then return end
 		local AllReleased = true
 		for _, Tool in ipairs(Session.Tools) do
@@ -1081,8 +1057,9 @@ function F.UpdateDualFire()
 		return
 	end
 	Session.ReadySince = Session.ReadySince or Now
-	local stableTime = C.RapidFireEnabled and 0 or C.DualFireReadyStable
-	if Now < Session.ReadyAfter or Now < St.LastDualFire + RepeatDelay or Now - Session.ReadySince < stableTime then
+	
+	-- Fixed: Force DualFire to always respect the stable timing
+	if Now < Session.ReadyAfter or Now < St.LastDualFire + RepeatDelay or Now - Session.ReadySince < C.DualFireReadyStable then
 		if Now >= Session.Deadline then F.EndDualFire("DB + TAC: readiness did not settle") end
 		return
 	end
@@ -1090,16 +1067,17 @@ function F.UpdateDualFire()
 		F.StopTriggerTarget()
 		return
 	end
+	
+	-- Fixed: Force DualFire to always respect its configured pulse durations
 	Session.Phase = "Release"
-	local pulseDuration = C.RapidFireEnabled and 0 or C.DualFirePulse
-	local holdDuration = C.RapidFireEnabled and 0 or C.DualFirePostShotHold
-	Session.ReleaseAt = Now + pulseDuration
-	Session.RestoreAt = Now + holdDuration
+	Session.ReleaseAt = Now + C.DualFirePulse
+	Session.RestoreAt = Now + C.DualFirePostShotHold
 	Session.ReleaseDeadline = Now + C.DualFireReleaseTimeout
 	Session.Activated = true
 	Session.Released = {}
 	St.LastDualFire = Now
 	St.ToolLastShots[DB], St.ToolLastShots[Tac] = Now, Now
+	
 	local Success, Error = pcall(function()
 		DB:Activate()
 		if Session.Automatic and (St.DualFire ~= Session or not St.Universal or not F.CanInteract() or not F.TriggerShotAllowed(Tac, ShotTarget)) then
@@ -1235,67 +1213,6 @@ function F.CharacterFromPart(Part)
 		Current = Current.Parent
 	end
 	return nil, nil
-end
-
---========================================================
--- HITBOX OVERRIDE SUITE
---========================================================
-
-function F.UpdateHitboxes()
-	for _, Player in ipairs(S.Players:GetPlayers()) do
-		if Player == S.Player then continue end
-		local Character = Player.Character
-		local Root = Character and Character:FindFirstChild("HumanoidRootPart")
-
-		if not Root or not Root:IsA("BasePart") then
-			if St.HitboxBoxes[Player] then
-				St.HitboxBoxes[Player]:Destroy()
-				St.HitboxBoxes[Player] = nil
-			end
-			continue
-		end
-
-		if not St.OriginalHitboxSizes[Player] then
-			St.OriginalHitboxSizes[Player] = {Size = Root.Size}
-		end
-
-		local Orig = St.OriginalHitboxSizes[Player]
-		local IsTarget = F.BasicTarget(Player, Character) and F.TargetSelected(Player)
-		local Box = St.HitboxBoxes[Player]
-
-		if IsTarget then
-			if C.HitboxExpanderEnabled then
-				Root.Size = Vector3.new(C.HitboxSize, C.HitboxSize, C.HitboxSize)
-			else
-				if Root.Size ~= Orig.Size then
-					Root.Size = Orig.Size
-				end
-			end
-
-			if C.ShowHitbox and not St.StreamerMode then
-				if not Box then
-					Box = Instance.new("BoxHandleAdornment")
-					Box.Name = "for the chosenHitboxVis"
-					Box.AlwaysOnTop = true
-					Box.ZIndex = 5
-					Box.Transparency = 0.5
-					Box.Color3 = T.RedBright
-					Box.Parent = TargetParent
-					St.HitboxBoxes[Player] = Box
-				end
-				Box.Adornee = Root
-				Box.Size = Root.Size
-				Box.Visible = true
-			else
-				if Box then Box.Visible = false end
-			end
-		else
-			if Root.Size ~= Orig.Size then
-				Root.Size = Orig.Size
-			end
-			if Box then Box.Visible = false end
-		end
-	end
 end
 
 function F.CursorTarget(Tool, RangeOverride)
@@ -2000,11 +1917,6 @@ function F.StartNameESP()
 		St.NameESPPending[Player] = nil
 		St.CrewCache[Player] = nil
 		F.RemoveNameESP(Player)
-		St.OriginalHitboxSizes[Player] = nil
-		if St.HitboxBoxes and St.HitboxBoxes[Player] then
-			St.HitboxBoxes[Player]:Destroy()
-			St.HitboxBoxes[Player] = nil
-		end
 	end)
 	for _, Player in ipairs(S.Players:GetPlayers()) do F.BindNameESPPlayer(Player) end
 	local LastReconcile = 0
@@ -2491,117 +2403,6 @@ function F.BuildSequencePage()
 	Info.Visible = false
 	UI.SequenceInfo = F.Label(Info, "", UDim2.new(1, -24, 1, -20), UDim2.fromOffset(12, 10), 9, T.Muted)
 	UI.SequenceInfo.TextWrapped = true
-
-	Section("TARGET HITBOX OVERRIDE")
-
-	local OverrideCard = F.Card(UI.SequenceScroll, 66)
-	OverrideCard.LayoutOrder = Next()
-	local TitleLabel = F.Label(OverrideCard, "Enable hitbox override", UDim2.fromOffset(320, 20), UDim2.fromOffset(13, 10), 11)
-	TitleLabel.Font = Enum.Font.GothamSemibold
-	F.Label(OverrideCard, "Expands physical target hitboxes to intercept trigger rays earlier.", UDim2.new(1, -180, 0, 24), UDim2.fromOffset(13, 35), 9, T.Muted)
-	local OverrideState = F.Button(OverrideCard, "OFF", UDim2.fromOffset(92, 34), UDim2.new(1, -107, 0, 16))
-	
-	local function RefreshOverride()
-		if C.HitboxExpanderEnabled then
-			OverrideState.Text = "ENABLED"
-			OverrideState.TextColor3 = T.RedBright
-			OverrideState.BackgroundColor3 = T.RedDark
-		else
-			OverrideState.Text = "OFF"
-			OverrideState.TextColor3 = T.Muted
-			OverrideState.BackgroundColor3 = T.Panel2
-		end
-	end
-	table.insert(UI.SettingRefreshers, RefreshOverride)
-	OverrideState.MouseButton1Click:Connect(function()
-		C.HitboxExpanderEnabled = not C.HitboxExpanderEnabled
-		RefreshOverride()
-	end)
-	RefreshOverride()
-
-	local VisCard = F.Card(UI.SequenceScroll, 66)
-	VisCard.LayoutOrder = Next()
-	local VisTitle = F.Label(VisCard, "Hitbox visualizer", UDim2.fromOffset(320, 20), UDim2.fromOffset(13, 10), 11)
-	VisTitle.Font = Enum.Font.GothamSemibold
-	F.Label(VisCard, "Shows a red translucent glowing box around targets.", UDim2.new(1, -180, 0, 24), UDim2.fromOffset(13, 35), 9, T.Muted)
-	local VisState = F.Button(VisCard, "OFF", UDim2.fromOffset(92, 34), UDim2.new(1, -107, 0, 16))
-	
-	local function RefreshVis()
-		if C.ShowHitbox then
-			VisState.Text = "ENABLED"
-			VisState.TextColor3 = T.RedBright
-			VisState.BackgroundColor3 = T.RedDark
-		else
-			VisState.Text = "OFF"
-			VisState.TextColor3 = T.Muted
-			VisState.BackgroundColor3 = T.Panel2
-		end
-	end
-	table.insert(UI.SettingRefreshers, RefreshVis)
-	VisState.MouseButton1Click:Connect(function()
-		C.ShowHitbox = not C.ShowHitbox
-		RefreshVis()
-	end)
-	RefreshVis()
-
-	local SliderCard = F.Card(UI.SequenceScroll, 66)
-	SliderCard.LayoutOrder = Next()
-	local SliderTitle = F.Label(SliderCard, "Hitbox size", UDim2.fromOffset(320, 20), UDim2.fromOffset(13, 10), 11)
-	SliderTitle.Font = Enum.Font.GothamSemibold
-	local SliderVal = F.Label(SliderCard, tostring(C.HitboxSize), UDim2.fromOffset(50, 20), UDim2.new(1, -63, 0, 10), 11, T.RedBright)
-	SliderVal.TextXAlignment = Enum.TextXAlignment.Right
-	SliderVal.Font = Enum.Font.GothamBold
-	F.ApplyAnimatedGradient(SliderVal)
-
-	local SliderBG = Instance.new("Frame")
-	SliderBG.Size = UDim2.new(1, -26, 0, 6)
-	SliderBG.Position = UDim2.fromOffset(13, 42)
-	SliderBG.BackgroundColor3 = T.Panel2
-	SliderBG.BorderSizePixel = 0
-	SliderBG.Parent = SliderCard
-	F.Round(SliderBG, 3)
-
-	local SliderFill = Instance.new("Frame")
-	SliderFill.Size = UDim2.fromScale(math.clamp((C.HitboxSize - 2) / 18, 0, 1), 1)
-	SliderFill.BackgroundColor3 = T.RedBright
-	SliderFill.BorderSizePixel = 0
-	SliderFill.Parent = SliderBG
-	F.Round(SliderFill, 3)
-
-	local DragButton = Instance.new("TextButton")
-	DragButton.Size = UDim2.fromScale(1, 1)
-	DragButton.Position = UDim2.fromOffset(0, 0)
-	DragButton.BackgroundTransparency = 1
-	DragButton.Text = ""
-	DragButton.Parent = SliderBG
-
-	local dragging = false
-	local function UpdateSlider(input)
-		local pos = math.clamp((input.Position.X - SliderBG.AbsolutePosition.X) / SliderBG.AbsoluteSize.X, 0, 1)
-		local value = math.floor(2 + 18 * pos + 0.5)
-		C.HitboxSize = value
-		SliderFill.Size = UDim2.fromScale(pos, 1)
-		SliderVal.Text = tostring(value)
-	end
-
-	DragButton.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = true
-			UpdateSlider(input)
-		end
-	end)
-
-	S.UIS.InputChanged:Connect(function(input)
-		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-			UpdateSlider(input)
-		end
-	end)
-
-	S.UIS.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = false
-		end
-	end)
 end
 
 function F.RefreshTargetsPage()
@@ -2840,7 +2641,7 @@ function F.BuildSettingsPage()
 	NumberSetting("Pair equip delay", "Allows both weapon scripts to finish equipping.", function() return math.floor(C.DualFireEquipDelay * 1000 + 0.5) end, function(Value) C.DualFireEquipDelay = Value / 1000 end, 0, 1000, " ms")
 
 	Section("INPUT BEHAVIOR")
-	ToggleSetting("Hold CameraLock", "CameraLock stays active only while its key is held.", function() return C.HoldCameraLock end, function(Value) C.HoldCameraLock = Value; F.DisableCameraLock() end)
+	ToggleSetting("Hold CameraLock", "CameraLock stays active only while its key is held.", function() return C.HoldCameraLock end, function(Value) C.HoldCameraLock = Value end)
 
 	Section("AIM ASSIST")
 	ToggleSetting("Aim assist", "Moves your camera toward a visible selected target inside the FOV.", function() return St.AimAssist end, function(Value) F.SetAimAssist(Value) end)
@@ -3327,8 +3128,6 @@ function F.StartRuntime()
 				Gradient.Offset = Vector2.new((os.clock() * 0.7) % 2 - 1, 0)
 			end
 		end
-		
-		F.UpdateHitboxes()
 
 		local Character = S.Player.Character
 		local Humanoid = F.Humanoid(Character)
@@ -3393,7 +3192,7 @@ local Success, Error = xpcall(function()
 	end
 	F.RefreshTargetsPage()
 	F.Refresh()
-	F.Log("for the chosen loaded / bidirectional fallback active")
+	F.Log("for the chosen loaded / db timing fixed")
 end, debug.traceback)
 
 if not Success then
