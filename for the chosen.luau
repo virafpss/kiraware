@@ -1,6 +1,6 @@
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 51+ / DB TIMING FIX
+-- CLIENT PAYLOAD / REVISION 51+ / DB TIMING & RF FIX
 --========================================================
 
 local C = {}
@@ -1009,20 +1009,17 @@ function F.UpdateDualFire()
 		F.EndDualFire("DB + TAC stopped: weapon system did not keep both guns equipped")
 		return
 	end
+	
+	-- Fixed: Pure release phase logic isolated from rapid fire toggles
 	if Session.Phase == "Release" then
-		-- Fixed: Removed RapidFire forcing ReleaseAt to Now, which caused blanking
 		if Now < Session.ReleaseAt then return end
 		local AllReleased = true
 		for _, Tool in ipairs(Session.Tools) do
 			if not Session.Released[Tool] then
-				if C.RapidFireEnabled or Tool.Enabled then
-					local Success, Error = pcall(function() Tool:Deactivate() end)
-					if not Success then F.EndDualFire("DB + TAC release failed: " .. tostring(Error)); return end
-					if St.DualFire ~= Session then return end
-					Session.Released[Tool] = true
-				else
-					AllReleased = false
-				end
+				local Success, Error = pcall(function() Tool:Deactivate() end)
+				if not Success then F.EndDualFire("DB + TAC release failed: " .. tostring(Error)); return end
+				if St.DualFire ~= Session then return end
+				Session.Released[Tool] = true
 			end
 		end
 		if AllReleased and Now >= Session.RestoreAt then
@@ -1043,6 +1040,7 @@ function F.UpdateDualFire()
 		end
 		return
 	end
+	
 	if not F.ToolReady(DB) or not F.ToolReady(Tac) then
 		Session.ReadySince = nil
 		if Now >= Session.Deadline then F.EndDualFire("DB + TAC: both guns did not become ready") end
@@ -1058,7 +1056,6 @@ function F.UpdateDualFire()
 	end
 	Session.ReadySince = Session.ReadySince or Now
 	
-	-- Fixed: Force DualFire to always respect the stable timing
 	if Now < Session.ReadyAfter or Now < St.LastDualFire + RepeatDelay or Now - Session.ReadySince < C.DualFireReadyStable then
 		if Now >= Session.Deadline then F.EndDualFire("DB + TAC: readiness did not settle") end
 		return
@@ -1068,7 +1065,6 @@ function F.UpdateDualFire()
 		return
 	end
 	
-	-- Fixed: Force DualFire to always respect its configured pulse durations
 	Session.Phase = "Release"
 	Session.ReleaseAt = Now + C.DualFirePulse
 	Session.RestoreAt = Now + C.DualFirePostShotHold
@@ -3074,7 +3070,7 @@ function F.StartRuntime()
 		F.Refresh()
 	end)
 	F.Connect(S.RunService.Heartbeat, function()
-		if St.MouseDown and not F.PointerOverPanel() then
+		if C.RapidFireEnabled and St.MouseDown and not F.PointerOverPanel() then
 			local Current = F.EquippedTool()
 			if Current and F.IsGunTool(Current) and F.ToolReady(Current) then
 				pcall(function() Current:Activate() end)
@@ -3192,7 +3188,7 @@ local Success, Error = xpcall(function()
 	end
 	F.RefreshTargetsPage()
 	F.Refresh()
-	F.Log("for the chosen loaded / db timing fixed")
+	F.Log("for the chosen loaded / db timing + rf fixed")
 end, debug.traceback)
 
 if not Success then
