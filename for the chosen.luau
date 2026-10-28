@@ -1,6 +1,6 @@
 --========================================================
 -- for the chosen
--- CLIENT PAYLOAD / REVISION 51+ / DB TIMING & RF FIX
+-- CLIENT PAYLOAD / REVISION 51+ / DB TIMING & NO RF & NO SPEED
 --========================================================
 
 local C = {}
@@ -99,11 +99,7 @@ C.ShowAimAssistFOV = true
 C.TargetCursorWeight = 0.70
 C.TargetWorldDistanceWeight = 0.30
 
-C.SpeedKey = Enum.KeyCode.V
-C.WalkSpeed = 32
-
 C.WallJumpEnabled = false
-C.RapidFireEnabled = true
 
 C.HoldCameraLock = false
 C.HoldSequential = false
@@ -162,10 +158,6 @@ St.StreamerMode = false
 St.AimAssist = false
 St.AimAssistTarget = nil
 St.LastAimScan = 0
-
-St.Speed = false
-St.SpeedHumanoid = nil
-St.DefaultWalkSpeed = nil
 
 St.NameESPEnabled = true
 St.NameESPTags = {}
@@ -234,7 +226,6 @@ St.CrouchAnimationIds = {}
 St.NextAnimationScan = 0
 
 St.HasWallJumped = false
-St.MouseDown = false
 
 St.FpsCount = 0
 St.LastFpsTime = os.clock()
@@ -430,14 +421,12 @@ function F.Cleanup()
 		St.NameESPTags[Player] = nil
 	end
 
-	St.Speed = false
 	St.HeldDualKey = nil
 	F.EndRangeFire()
 	F.EndDualFire()
 	F.ReleaseTool()
 	F.FlushToolReleases()
 	table.clear(St.PendingToolReleases)
-	F.ApplySpeed()
 	S.RunService:UnbindFromRenderStep(St.RenderBinding)
 	S.OnSound:Destroy()
 	S.OffSound:Destroy()
@@ -451,7 +440,7 @@ function F.SetKey(Name, Key)
 		return false
 	end
 	for _, Other in ipairs({"CameraLockKey", "MenuKey", "StreamerKey",
-		"SpeedKey", "AimAssistKey", "DualFireKey"}) do
+		"AimAssistKey", "DualFireKey"}) do
 		if Other ~= Name and C[Other] == Key then
 			F.Log(Key.Name .. " is already bound to " .. Other)
 			return false
@@ -571,30 +560,6 @@ function F.InRange(Character, Tool)
 		return false
 	end
 	return (TheirRoot.Position - MyRoot.Position).Magnitude <= F.RangeForTool(Tool)
-end
-
-function F.ApplySpeed()
-	local Humanoid = F.Humanoid(S.Player.Character)
-	if not St.Speed or St.SpeedHumanoid ~= Humanoid then
-		if St.SpeedHumanoid and St.SpeedHumanoid.Parent and St.DefaultWalkSpeed ~= nil then
-			St.SpeedHumanoid.WalkSpeed = St.DefaultWalkSpeed
-		end
-		St.SpeedHumanoid = nil
-		St.DefaultWalkSpeed = nil
-	end
-	if not St.Speed or not Humanoid or Humanoid.Health <= 0 then return end
-	if St.SpeedHumanoid ~= Humanoid then
-		St.SpeedHumanoid = Humanoid
-		St.DefaultWalkSpeed = Humanoid.WalkSpeed
-	end
-	Humanoid.WalkSpeed = C.WalkSpeed
-end
-
-function F.SetSpeed(Enabled)
-	St.Speed = Enabled == true
-	F.ApplySpeed()
-	F.Log(St.Speed and ("Speed ON / " .. tostring(C.WalkSpeed)) or "Speed OFF")
-	F.Refresh()
 end
 
 function F.Crouch(Character)
@@ -1010,7 +975,6 @@ function F.UpdateDualFire()
 		return
 	end
 	
-	-- Fixed: Pure release phase logic isolated from rapid fire toggles
 	if Session.Phase == "Release" then
 		if Now < Session.ReleaseAt then return end
 		local AllReleased = true
@@ -1647,11 +1611,11 @@ function F.FireTool(Tool, Target)
 		F.ReleaseTool()
 		return false
 	end
-	if St.ActiveTool and not C.RapidFireEnabled then
+	if St.ActiveTool then
 		if St.ActiveTool ~= Tool then F.ReleaseTool() end
 		return false
 	end
-	if not C.RapidFireEnabled and (St.PendingToolReleases[Tool] or St.ToolReleasedFrame[Tool] == St.TriggerFrame) then
+	if St.PendingToolReleases[Tool] or St.ToolReleasedFrame[Tool] == St.TriggerFrame then
 		return false
 	end
 	if not F.TriggerShotAllowed(Tool, Target) then
@@ -1659,17 +1623,10 @@ function F.FireTool(Tool, Target)
 		return false
 	end
 	St.ActiveTool = Tool
-	if C.RapidFireEnabled then
-		pcall(function() Tool:Activate() end)
-		task.defer(function()
-			pcall(function() Tool:Deactivate() end)
-		end)
-	else
-		local Success, Error = pcall(function() Tool:Activate() end)
-		if not Success then
-			F.ReleaseTool()
-			F.Log("Trigger activation failed: " .. tostring(Error))
-		end
+	local Success, Error = pcall(function() Tool:Activate() end)
+	if not Success then
+		F.ReleaseTool()
+		F.Log("Trigger activation failed: " .. tostring(Error))
 	end
 	return true
 end
@@ -1763,7 +1720,7 @@ function F.UniversalMain()
 	if C.RangeAuto then F.RangeMain(); return end
 	F.EndRangeFire()
 	local Current = F.EquippedTool()
-	if St.ActiveTool and St.ActiveTool ~= Current and not C.RapidFireEnabled then F.ReleaseTool() end
+	if St.ActiveTool and St.ActiveTool ~= Current then F.ReleaseTool() end
 	if not F.ToolReady(Current) then
 		F.StopTriggerTarget()
 		return
@@ -2629,7 +2586,6 @@ function F.BuildSettingsPage()
 	KeySetting("CameraLock key", "Toggles CameraLock. The camera follows the selected target's body.", function() return C.CameraLockKey end, function(Key) F.SetKey("CameraLockKey", Key) end)
 	KeySetting("Menu key", "Opens and closes the menu.", function() return C.MenuKey end, function(Key) F.SetKey("MenuKey", Key) end)
 	KeySetting("Streamer mode", "Toggles streamer mode.", function() return C.StreamerKey end, function(Key) F.SetKey("StreamerKey", Key) end)
-	KeySetting("Speed key", "Toggles the local walk-speed override.", function() return C.SpeedKey end, function(Key) F.SetKey("SpeedKey", Key) end)
 	KeySetting("Aim assist key", "Toggles local camera aim assist for selected targets.", function() return C.AimAssistKey end, function(Key) F.SetKey("AimAssistKey", Key) end)
 
 	Section("DB + TAC TIMING")
@@ -2646,10 +2602,6 @@ function F.BuildSettingsPage()
 
 	Section("MOVEMENT & COMBAT UTILS")
 	ToggleSetting("Wall Jump", "Allows jumping once off any wall when enabled.", function() return C.WallJumpEnabled end, function(Value) C.WallJumpEnabled = Value end)
-	ToggleSetting("Rapid Fire", "Enables rapid firing for active triggers.", function() return C.RapidFireEnabled end, function(Value) C.RapidFireEnabled = Value end)
-
-	ToggleSetting("Speed", "Toggles the local walk-speed override.", function() return St.Speed end, function(Value) F.SetSpeed(Value) end)
-	NumberSetting("Walk speed", "WalkSpeed used while Speed is enabled.", function() return C.WalkSpeed end, function(Value) C.WalkSpeed = Value; if St.Speed then F.ApplySpeed() end end, 1, 100, "")
 
 	Section("PLAYER ESP")
 	ToggleSetting("Player names", "Selected targets are red; other crewmates are green. Everyone else is hidden.", function() return St.NameESPEnabled end, function(Value) St.NameESPEnabled = Value; F.ApplyNameESPVisibility() end)
@@ -2990,7 +2942,6 @@ function F.SetupCharacter(Character)
 			St.AimAssistTarget = nil
 			F.StopTriggerTarget()
 		end, St.CharacterConnections)
-		F.ApplySpeed()
 		F.SeedSlots()
 		F.Log("Character ready")
 	end)
@@ -2998,14 +2949,6 @@ end
 
 function F.HandleInput(Input, Processed)
 	if not St.Ready or not St.Focused then return end
-	
-	if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-		if Input.UserInputState == Enum.UserInputState.Begin then
-			St.MouseDown = true
-		elseif Input.UserInputState == Enum.UserInputState.End then
-			St.MouseDown = false
-		end
-	end
 
 	if Input.UserInputType ~= Enum.UserInputType.Keyboard then return end
 	local Key = Input.KeyCode
@@ -3041,8 +2984,6 @@ function F.HandleInput(Input, Processed)
 		return
 	elseif Key == C.AimAssistKey then
 		F.SetAimAssist(not St.AimAssist)
-	elseif Key == C.SpeedKey then
-		F.SetSpeed(not St.Speed)
 	end
 	F.Refresh()
 end
@@ -3062,24 +3003,11 @@ function F.StartRuntime()
 		F.HandleInput(Input, Processed)
 	end)
 	F.Connect(S.UIS.InputEnded, function(Input)
-		if Input.UserInputType == Enum.UserInputType.MouseButton1 then
-			St.MouseDown = false
-		end
 		if Input.KeyCode == St.HeldDualKey then St.HeldDualKey = nil end
 		if Input.KeyCode == St.HeldCameraKey then St.HeldCameraKey = nil; F.DisableCameraLock() end
 		F.Refresh()
 	end)
 	F.Connect(S.RunService.Heartbeat, function()
-		if C.RapidFireEnabled and St.MouseDown and not F.PointerOverPanel() then
-			local Current = F.EquippedTool()
-			if Current and F.IsGunTool(Current) and F.ToolReady(Current) then
-				pcall(function() Current:Activate() end)
-				task.defer(function()
-					pcall(function() Current:Deactivate() end)
-				end)
-			end
-		end
-
 		F.ReleaseTool()
 		F.FlushToolReleases()
 		F.UpdateDualFire()
@@ -3090,7 +3018,7 @@ function F.StartRuntime()
 		end
 	end)
 	F.Connect(S.UIS.WindowFocused, function() St.Focused = true end)
-	F.Connect(S.UIS.WindowFocusReleased, function() St.Focused = false; F.PauseInput(); St.MouseDown = false end)
+	F.Connect(S.UIS.WindowFocusReleased, function() St.Focused = false; F.PauseInput() end)
 	F.Connect(S.UIS.TextBoxFocused, F.PauseInput)
 	F.Connect(S.GuiService.MenuOpened, F.PauseInput)
 	F.Connect(S.Player.CharacterAdded, F.SetupCharacter)
@@ -3165,7 +3093,6 @@ function F.StartRuntime()
 			F.UpdateTriggerFOV()
 			return
 		end
-		if St.Speed then F.ApplySpeed() end
 		if not St.Universal or not F.KO(Character) or not F.Crouch(Character) then
 			F.StopTriggerTarget()
 			F.UpdateTriggerFOV()
@@ -3188,7 +3115,7 @@ local Success, Error = xpcall(function()
 	end
 	F.RefreshTargetsPage()
 	F.Refresh()
-	F.Log("for the chosen loaded / db timing + rf fixed")
+	F.Log("for the chosen loaded / speed & rapid fire removed")
 end, debug.traceback)
 
 if not Success then
